@@ -1,0 +1,24 @@
+{
+  "sources": [
+    {
+      "id": "AQA",
+      "name": "AQA Chemistry",
+      "type": "dify_chat",
+      "api_url": "http://host.docker.internal/v1",
+      "auth_ref": "DIFY_API_KEY_AQA",
+      "description": "AQA A2 Chemistry",
+      "enabled": true,
+      "default_inputs": {}
+    },
+    {
+      "id": "CIE",
+      "name": "CIE Chemistry",
+      "type": "dify_chat",
+      "api_url": "http://host.docker.internal/v1",
+      "auth_ref": "DIFY_API_KEY_CIE",
+      "description": "CIE A2 Chemistry",
+      "enabled": true,
+      "default_inputs": {}
+    }
+  ]
+}

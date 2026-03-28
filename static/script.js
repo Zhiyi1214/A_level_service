@@ -6,6 +6,9 @@ let pendingChatRequests = 0;
 let lastEnterDownMs = 0;
 let chatAbortController = null;
 let sendBtnDefaultHtml = '';
+let availableSources = [];
+let selectedSourceId = '';
+const THEME_STORAGE_KEY = 'a_level_theme';
 
 // Initialize app
 document.addEventListener('DOMContentLoaded', function() {
@@ -22,10 +25,55 @@ document.addEventListener('DOMContentLoaded', function() {
     if (sb) {
         sendBtnDefaultHtml = sb.innerHTML;
     }
+    initTheme();
     syncSendBtn();
+    loadSources();
     loadConversations();
     setupEventListeners();
 });
+
+function renderWelcomeState() {
+    return `
+        <div class="welcome-section">
+            <div class="welcome-orb">
+                <span class="welcome-orb-core"></span>
+                <span class="welcome-orb-ring welcome-orb-ring-one"></span>
+                <span class="welcome-orb-ring welcome-orb-ring-two"></span>
+            </div>
+        </div>
+    `;
+}
+
+function applyTheme(theme) {
+    const body = document.body;
+    if (!body) return;
+    const nextTheme = theme === 'light' ? 'light' : 'dark';
+    body.setAttribute('data-theme', nextTheme);
+    const toggleIcon = document.querySelector('.theme-toggle-icon');
+    if (toggleIcon) {
+        toggleIcon.textContent = nextTheme === 'dark' ? '☀' : '☾';
+    }
+    try {
+        localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+    } catch (e) {
+        console.warn('Theme persistence skipped:', e);
+    }
+}
+
+function initTheme() {
+    let preferredTheme = 'dark';
+    try {
+        preferredTheme = localStorage.getItem(THEME_STORAGE_KEY) || preferredTheme;
+    } catch (e) {
+        console.warn('Theme read skipped:', e);
+    }
+    applyTheme(preferredTheme);
+}
+
+function toggleTheme() {
+    const currentTheme = document.body.getAttribute('data-theme') || 'dark';
+    applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
+}
 
 function getPurify() {
     return typeof DOMPurify !== 'undefined' ? DOMPurify : (typeof window !== 'undefined' && window.DOMPurify ? window.DOMPurify : null);
@@ -88,9 +136,6 @@ function renderMdWithInlineMath(mdChunk, purify) {
     }
     if (last < mdChunk.length) {
         parts.push(...splitDollarInlineThenMd(mdChunk.slice(last), purify));
-    }
-    if (parts.length === 0) {
-        parts.push(...splitDollarInlineThenMd(mdChunk, purify));
     }
     return parts.map(p => p.html).join('');
 }
@@ -233,10 +278,6 @@ function setChatBusy(busy) {
     } else {
         pendingChatRequests = Math.max(0, pendingChatRequests - 1);
     }
-    const bar = document.getElementById('chatStatusBar');
-    if (bar) {
-        bar.hidden = pendingChatRequests === 0;
-    }
     syncSendBtn();
 }
 
@@ -273,30 +314,115 @@ function stopChatRequest() {
 function setupEventListeners() {
     const messageInput = document.getElementById('messageInput');
     
-    // Auto-expand textarea
     messageInput.addEventListener('input', function() {
         this.style.height = 'auto';
-        this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+        this.style.height = Math.max(44, Math.min(this.scrollHeight, 140)) + 'px';
     });
+}
+
+function onSourceChange() {
+    if (currentConversationId) {
+        // 会话中被锁定，理论上不会触发（select disabled），这里做兜底
+        const select = document.getElementById('sourceSelect');
+        if (select) select.value = selectedSourceId || '';
+        return;
+    }
+    const select = document.getElementById('sourceSelect');
+    selectedSourceId = select ? select.value : '';
+}
+
+function setSourceLocked(locked) {
+    const select = document.getElementById('sourceSelect');
+    if (select) {
+        select.disabled = !!locked;
+    }
+}
+
+function renderSourceOptions() {
+    const select = document.getElementById('sourceSelect');
+    if (!select) return;
+    if (!availableSources.length) {
+        select.innerHTML = '<option value="">无知识库</option>';
+        select.disabled = true;
+        return;
+    }
+
+    const placeholder = '<option value="">选择知识库</option>';
+    const options = availableSources
+        .map(s => `<option value="${escapeHtml(String(s.id))}">${escapeHtml(String(s.name || s.id))}</option>`)
+        .join('');
+    select.innerHTML = placeholder + options;
+    if (selectedSourceId && availableSources.find(s => s.id === selectedSourceId)) {
+        select.value = selectedSourceId;
+    } else {
+        selectedSourceId = '';
+        select.value = '';
+    }
+    setSourceLocked(!!currentConversationId);
+}
+
+async function loadSources() {
+    try {
+        const response = await fetch('/api/sources');
+        const data = await response.json();
+        if (response.ok && data.success && Array.isArray(data.sources)) {
+            availableSources = data.sources.filter(s => s && s.enabled !== false);
+        } else {
+            availableSources = [];
+        }
+    } catch (error) {
+        console.error('Error loading sources:', error);
+        availableSources = [];
+    }
+    renderSourceOptions();
+}
+
+async function ensureSessionReady() {
+    if (currentConversationId) return true;
+    if (!selectedSourceId) {
+        addMessageToUI('assistant', '❌ 请先选择知识库再开始对话。');
+        return false;
+    }
+    try {
+        const response = await fetch('/api/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                source_id: selectedSourceId,
+                user_id: userId
+            })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+            addMessageToUI('assistant', '❌ 创建会话失败：' + (data.error || ('HTTP ' + response.status)));
+            return false;
+        }
+        currentConversationId = data.session_id || data.conversation_id;
+        selectedSourceId = data.source_id || selectedSourceId;
+        setSourceLocked(true);
+        loadConversations();
+        return true;
+    } catch (error) {
+        addMessageToUI('assistant', '❌ 创建会话失败：' + (error && error.message ? error.message : String(error)));
+        return false;
+    }
 }
 
 // Load conversations from backend
 async function loadConversations() {
     try {
         const response = await fetch(`/api/conversations?user_id=${userId}`);
+        if (!response.ok) return;
         const data = await response.json();
-        
         const container = document.getElementById('conversationsList');
-        
+
         if (data.conversations && Object.keys(data.conversations).length > 0) {
             container.innerHTML = '';
-            
             Object.entries(data.conversations).forEach(([id, conv]) => {
-                const item = createConversationItem(id, conv);
-                container.appendChild(item);
+                container.appendChild(createConversationItem(id, conv));
             });
         } else {
-            container.innerHTML = '<div class="empty-state">No conversations yet</div>';
+            container.innerHTML = '<div class="empty-state">还没有会话</div>';
         }
     } catch (error) {
         console.error('Error loading conversations:', error);
@@ -307,88 +433,85 @@ async function loadConversations() {
 function createConversationItem(id, conv) {
     const div = document.createElement('div');
     div.className = 'conversation-item';
+    div.dataset.convId = id;
     if (id === currentConversationId) {
         div.classList.add('active');
     }
-    
+
     const lastMessage = conv.last_message;
-    let preview = 'New conversation';
-    
+    let preview = '新对话';
     if (lastMessage) {
         let content = lastMessage.content;
         if (typeof content === 'object') {
-            content = content[0]?.text || 'Image message';
+            content = content[0]?.text || '图片消息';
         }
         preview = content.substring(0, 40) + (content.length > 40 ? '...' : '');
     }
-    
-    div.innerHTML = `
-        <span style="flex: 1; cursor: pointer;" onclick="switchConversation('${id}')">${preview}</span>
-        <button class="delete-btn" onclick="deleteConversation('${id}', event)">×</button>
-    `;
-    
+    const sourcePrefix = conv && conv.source_name ? `[${conv.source_name}] ` : '';
+
+    const trigger = document.createElement('span');
+    trigger.className = 'conversation-trigger';
+    trigger.textContent = sourcePrefix + preview;
+    trigger.addEventListener('click', () => switchConversation(id));
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'delete-btn';
+    delBtn.textContent = '×';
+    delBtn.addEventListener('click', (e) => deleteConversation(id, e));
+
+    div.appendChild(trigger);
+    div.appendChild(delBtn);
     return div;
 }
 
 // Start new chat
 function startNewChat() {
     currentConversationId = null;
+    selectedSourceId = '';
     uploadedFiles = [];
-    document.getElementById('uploadedFiles').innerHTML = '';
-    document.getElementById('messageInput').value = '';
-    document.getElementById('chatTitle').textContent = 'Start a new conversation';
-    document.getElementById('chatSubtitle').textContent = 'Ask me anything';
+    resetComposer();
+    renderSourceOptions();
+    setSourceLocked(false);
     
-    // Reset messages area to welcome screen
     const messagesArea = document.getElementById('messagesArea');
-    messagesArea.innerHTML = `
-        <div class="welcome-section">
-            <div class="welcome-icon">👋</div>
-            <h2>Welcome to AI Assistant</h2>
-            <p>Powered by Dify - Your intelligent conversation partner</p>
-            <div class="quick-starts">
-                <button class="quick-start-btn" onclick="sendMessage('What can you help me with?')">
-                    What can you help me with?
-                </button>
-                <button class="quick-start-btn" onclick="sendMessage('Tell me about your capabilities')">
-                    Tell me about your capabilities
-                </button>
-                <button class="quick-start-btn" onclick="sendMessage('How can I use images with my queries?')">
-                    Image support info
-                </button>
-            </div>
-        </div>
-    `;
+    messagesArea.innerHTML = renderWelcomeState();
+    closeSidebar();
     
     loadConversations();
 }
 
 // Switch conversation
 async function switchConversation(conversationId) {
-    currentConversationId = conversationId;
-    uploadedFiles = [];
-    document.getElementById('uploadedFiles').innerHTML = '';
-    document.getElementById('messageInput').value = '';
-    
     try {
-        const response = await fetch(`/api/conversations/${conversationId}`);
-        const data = await response.json();
-        
-        if (data.success) {
-            displayConversation(data);
+        const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}?user_id=${encodeURIComponent(userId)}`);
+        if (!response.ok) {
+            console.error('Error loading conversation: HTTP', response.status);
+            return;
         }
+        const data = await response.json();
+        if (!data.success) {
+            console.error('Error loading conversation:', data.error);
+            return;
+        }
+
+        currentConversationId = conversationId;
+        uploadedFiles = [];
+        resetComposer();
+        if (data.source_id) {
+            selectedSourceId = data.source_id;
+            renderSourceOptions();
+        }
+        setSourceLocked(true);
+        displayConversation(data);
+        closeSidebar();
+        loadConversations();
     } catch (error) {
         console.error('Error loading conversation:', error);
     }
-    
-    loadConversations();
 }
 
 // Display conversation
 function displayConversation(conv) {
-    document.getElementById('chatTitle').textContent = 'Conversation';
-    document.getElementById('chatSubtitle').textContent = new Date(conv.created_at).toLocaleDateString();
-    
     const messagesArea = document.getElementById('messagesArea');
     messagesArea.innerHTML = '';
     
@@ -396,7 +519,7 @@ function displayConversation(conv) {
         conv.messages.forEach(msg => {
             addMessageToUI(msg.role, msg.content);
         });
-        messagesArea.scrollTop = messagesArea.scrollHeight;
+        scrollMessagesToBottom();
     }
 }
 
@@ -404,12 +527,12 @@ function displayConversation(conv) {
 async function deleteConversation(conversationId, event) {
     event.stopPropagation();
     
-    if (!confirm('Are you sure you want to delete this conversation?')) {
+    if (!confirm('确定要删除这条会话吗？')) {
         return;
     }
     
     try {
-        const response = await fetch(`/api/conversations/${conversationId}`, {
+        const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}?user_id=${encodeURIComponent(userId)}`, {
             method: 'DELETE'
         });
         
@@ -441,42 +564,35 @@ function handleFileSelect(event) {
     }
 }
 
-// Add file tag to UI
+let fileIdCounter = 0;
+
 function addFileTag(file) {
     const container = document.getElementById('uploadedFiles');
-    
+    const fileId = ++fileIdCounter;
+    file._tagId = fileId;
+
     const tag = document.createElement('div');
     tag.className = 'file-tag';
-    
-    const icon = getFileIcon(file.type);
-    const fileName = file.name.length > 20 ? file.name.substring(0, 17) + '...' : file.name;
-    
-    tag.innerHTML = `
-        <span>${icon} ${fileName}</span>
-        <button class="remove-btn" onclick="removeFile('${file.name}')">×</button>
-    `;
-    
+    tag.dataset.fileId = fileId;
+
+    const label = document.createElement('span');
+    const displayName = file.name.length > 20 ? file.name.substring(0, 17) + '...' : file.name;
+    label.textContent = '🖼️ ' + displayName;
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove-btn';
+    removeBtn.textContent = '×';
+    removeBtn.addEventListener('click', () => removeFileById(fileId));
+
+    tag.appendChild(label);
+    tag.appendChild(removeBtn);
     container.appendChild(tag);
 }
 
-// Get file icon based on type
-function getFileIcon(fileType) {
-    if (fileType.startsWith('image/')) return '🖼️';
-    if (fileType.includes('pdf')) return '📄';
-    if (fileType.includes('word')) return '📝';
-    return '📎';
-}
-
-// Remove file
-function removeFile(fileName) {
-    uploadedFiles = uploadedFiles.filter(f => f.name !== fileName);
-    
-    const tags = document.querySelectorAll('.file-tag');
-    tags.forEach(tag => {
-        if (tag.textContent.includes(fileName)) {
-            tag.remove();
-        }
-    });
+function removeFileById(fileId) {
+    uploadedFiles = uploadedFiles.filter(f => f._tagId !== fileId);
+    const tag = document.querySelector(`.file-tag[data-file-id="${fileId}"]`);
+    if (tag) tag.remove();
 }
 
 // Handle input keydown：连续两次 Enter（约 0.52s 内）发送；Shift+Enter 换行
@@ -495,9 +611,9 @@ function handleInputKeydown(event) {
 }
 
 // Send message
-async function sendMessage(quickMessage = null) {
+async function sendMessage() {
     const input = document.getElementById('messageInput');
-    const message = quickMessage || input.value.trim();
+    const message = input.value.trim();
 
     if (!message) {
         return;
@@ -506,8 +622,14 @@ async function sendMessage(quickMessage = null) {
         return;
     }
 
+    const hasSession = await ensureSessionReady();
+    if (!hasSession) {
+        return;
+    }
+
     // Add user message to UI
     addMessageToUI('user', message);
+    const pendingAssistantMessage = addMessageToUI('assistant', '正在生成回复...', { pending: true });
 
     // Clear input and files
     input.value = '';
@@ -524,6 +646,7 @@ async function sendMessage(quickMessage = null) {
         formData.append('message', message);
         formData.append('conversation_id', currentConversationId || '');
         formData.append('user_id', userId);
+        formData.append('source_id', selectedSourceId || '');
 
         // Add uploaded files
         uploadedFiles.forEach(file => {
@@ -548,43 +671,49 @@ async function sendMessage(quickMessage = null) {
                 ? '（上游返回了 HTML，多为反向代理/Nginx 超时或 502）'
                 : '';
             const snippet = rawText ? rawText.slice(0, 280).replace(/\s+/g, ' ') : '';
-            addMessageToUI('assistant', '❌ Error: 响应不是合法 JSON (HTTP ' + response.status + ') ' + hint + (snippet ? '\n' + snippet : ''));
+            updateMessageInUI(pendingAssistantMessage, 'assistant', '❌ Error: 响应不是合法 JSON (HTTP ' + response.status + ') ' + hint + (snippet ? '\n' + snippet : ''));
             return;
         }
 
         if (!response.ok) {
             const detail = data.detail || data.error || '';
-            addMessageToUI('assistant', '❌ Error: HTTP ' + response.status + (detail ? ' — ' + detail : ''));
+            if (response.status === 409 && data.error === 'source_locked') {
+                updateMessageInUI(pendingAssistantMessage, 'assistant', '❌ 当前会话已锁定知识库，不能中途切换。请新建对话后再切换。');
+            } else {
+                updateMessageInUI(pendingAssistantMessage, 'assistant', '❌ Error: HTTP ' + response.status + (detail ? ' — ' + detail : ''));
+            }
             return;
         }
 
         const replyText = pickAssistantReply(data);
-        const hasSuccessFlag = data.success === true;
-        const hasReply = replyText.length > 0;
 
-        if (hasSuccessFlag || (!hasSuccessFlag && data.success !== false && hasReply)) {
+        if (data.success !== false) {
             const apiConv = data.conversation_id;
             // 始终以服务端返回的 conversation_id 为准，保证与 Dify 多轮一致
             if (apiConv) {
                 currentConversationId = apiConv;
             }
-            addMessageToUI('assistant', replyText || '(未收到模型正文，请检查 Dify 应用与 API 返回结构)');
+            if (data.source_id) {
+                selectedSourceId = data.source_id;
+                renderSourceOptions();
+            }
+            setSourceLocked(true);
+            updateMessageInUI(pendingAssistantMessage, 'assistant', replyText || '(未收到模型正文，请检查 Dify 应用与 API 返回结构)');
 
             loadConversations();
             updateActiveConversation();
 
-            const messagesArea = document.getElementById('messagesArea');
-            messagesArea.scrollTop = messagesArea.scrollHeight;
+            scrollMessagesToBottom();
         } else {
             const detail = data.detail ? ` (${data.detail})` : '';
-            addMessageToUI('assistant', '❌ Error: ' + (data.error || 'Failed to get response') + detail);
+            updateMessageInUI(pendingAssistantMessage, 'assistant', '❌ Error: ' + (data.error || 'Failed to get response') + detail);
         }
     } catch (error) {
         console.error('Error sending message:', error);
         if (error && error.name === 'AbortError') {
-            addMessageToUI('assistant', '已停止生成。');
+            updateMessageInUI(pendingAssistantMessage, 'assistant', '已停止生成。');
         } else {
-            addMessageToUI('assistant', '❌ Connection error: ' + (error && error.message ? error.message : String(error)));
+            updateMessageInUI(pendingAssistantMessage, 'assistant', '❌ Connection error: ' + (error && error.message ? error.message : String(error)));
         }
     } finally {
         chatAbortController = null;
@@ -592,30 +721,57 @@ async function sendMessage(quickMessage = null) {
     }
 }
 
-// Add message to UI
-function addMessageToUI(role, content) {
+function removeWelcomeSection() {
     const messagesArea = document.getElementById('messagesArea');
-    
-    // Remove welcome section if it exists
     const welcomeSection = messagesArea.querySelector('.welcome-section');
     if (welcomeSection) {
         welcomeSection.remove();
     }
-    
-    const message = document.createElement('div');
-    message.className = `message ${role}`;
-    
-    const avatar = document.createElement('div');
-    avatar.className = 'message-avatar';
-    avatar.textContent = role === 'user' ? '👤' : '🤖';
-    
-    const bubble = document.createElement('div');
+}
+
+function resetComposer() {
+    const uploadedFilesContainer = document.getElementById('uploadedFiles');
+    const messageInput = document.getElementById('messageInput');
+    if (uploadedFilesContainer) {
+        uploadedFilesContainer.innerHTML = '';
+    }
+    if (messageInput) {
+        messageInput.value = '';
+        messageInput.style.height = '44px';
+    }
+}
+
+function closeSidebar() {
+    const sidebar = document.querySelector('.sidebar');
+    if (sidebar) {
+        sidebar.classList.remove('show');
+    }
+}
+
+function scrollMessagesToBottom() {
+    const messagesArea = document.getElementById('messagesArea');
+    if (!messagesArea) return;
+    messagesArea.scrollTop = messagesArea.scrollHeight;
+}
+
+function renderMessageBubble(bubble, role, content, options = {}) {
+    bubble.innerHTML = '';
     bubble.className = 'message-bubble';
-    
-    if (role === 'assistant') {
+
+    if (role === 'assistant' && !options.pending) {
         bubble.classList.add('message-bubble-md');
     }
-    
+    if (options.pending) {
+        bubble.classList.add('message-bubble-pending');
+        bubble.innerHTML = `
+            <span class="pending-label">正在生成回复</span>
+            <span class="pending-dots" aria-hidden="true">
+                <span></span><span></span><span></span>
+            </span>
+        `;
+        return;
+    }
+
     // Handle content (could be string or array)
     if (role === 'user') {
         if (typeof content === 'string') {
@@ -655,6 +811,46 @@ function addMessageToUI(role, content) {
             });
         }
     }
+}
+
+function updateMessageInUI(message, role, content, options = {}) {
+    if (!message) return null;
+    message.className = `message ${role}`;
+    if (options.pending) {
+        message.classList.add('message-pending');
+    }
+
+    const avatar = message.querySelector('.message-avatar');
+    if (avatar) {
+        avatar.textContent = role === 'user' ? '👤' : '🤖';
+    }
+
+    const bubble = message.querySelector('.message-bubble');
+    if (bubble) {
+        renderMessageBubble(bubble, role, content, options);
+    }
+
+    scrollMessagesToBottom();
+    return message;
+}
+
+// Add message to UI
+function addMessageToUI(role, content, options = {}) {
+    const messagesArea = document.getElementById('messagesArea');
+    removeWelcomeSection();
+
+    const message = document.createElement('div');
+    message.className = `message ${role}`;
+    if (options.pending) {
+        message.classList.add('message-pending');
+    }
+    
+    const avatar = document.createElement('div');
+    avatar.className = 'message-avatar';
+    avatar.textContent = role === 'user' ? '👤' : '🤖';
+    
+    const bubble = document.createElement('div');
+    renderMessageBubble(bubble, role, content, options);
     
     if (role === 'user') {
         message.appendChild(bubble);
@@ -665,6 +861,8 @@ function addMessageToUI(role, content) {
     }
     
     messagesArea.appendChild(message);
+    scrollMessagesToBottom();
+    return message;
 }
 
 // Escape HTML to prevent XSS
@@ -674,14 +872,9 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// Update active conversation
 function updateActiveConversation() {
-    const items = document.querySelectorAll('.conversation-item');
-    items.forEach(item => {
-        item.classList.remove('active');
-        if (item.textContent.includes(currentConversationId)) {
-            item.classList.add('active');
-        }
+    document.querySelectorAll('.conversation-item').forEach(item => {
+        item.classList.toggle('active', item.dataset.convId === currentConversationId);
     });
 }
 
@@ -691,33 +884,4 @@ function toggleSidebar() {
     sidebar.classList.toggle('show');
 }
 
-// Update chat title when conversation loads
-function updateChatTitle() {
-    if (currentConversationId) {
-        const item = document.querySelector(`.conversation-item.active`);
-        if (item) {
-            const preview = item.textContent.trim();
-            document.getElementById('chatTitle').textContent = preview.substring(0, 50);
-        }
-    } else {
-        document.getElementById('chatTitle').textContent = 'New Conversation';
-    }
-}
-
-// Utility function to format timestamps
-function formatTime(isoString) {
-    const date = new Date(isoString);
-    const now = new Date();
-    const diffInMs = now - date;
-    const diffInMinutes = Math.floor(diffInMs / 60000);
-    const diffInHours = Math.floor(diffInMs / 3600000);
-    const diffInDays = Math.floor(diffInMs / 86400000);
-    
-    if (diffInMinutes < 1) return 'just now';
-    if (diffInMinutes < 60) return `${diffInMinutes}m ago`;
-    if (diffInHours < 24) return `${diffInHours}h ago`;
-    if (diffInDays < 7) return `${diffInDays}d ago`;
-    
-    return date.toLocaleDateString();
-}
 

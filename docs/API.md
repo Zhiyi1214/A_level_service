@@ -8,7 +8,58 @@
 
 ## 端点列表
 
-### 1. 发送消息
+### 1. 获取知识库列表
+
+`GET /api/sources`
+
+**成功响应 (200)**
+
+```json
+{
+  "success": true,
+  "sources": [
+    {
+      "id": "kb_a",
+      "name": "知识库 A",
+      "type": "dify_chat",
+      "description": "主知识库",
+      "enabled": true
+    }
+  ]
+}
+```
+
+---
+
+### 2. 创建会话（锁定知识库）
+
+**请求**
+
+```http
+POST /api/sessions
+Content-Type: application/json
+```
+
+**参数**
+
+- `source_id` (string, 必需): 选择的知识库 ID
+- `user_id` (string, 可选): 用户 ID
+
+**成功响应 (200)**
+
+```json
+{
+  "success": true,
+  "session_id": "2026-03-28T12:34:56.000000",
+  "conversation_id": "2026-03-28T12:34:56.000000",
+  "source_id": "kb_a",
+  "source_name": "知识库 A"
+}
+```
+
+---
+
+### 3. 发送消息
 
 **请求**
 
@@ -20,8 +71,9 @@ Content-Type: multipart/form-data
 **参数**
 
 - `message` (string, 必需): 用户消息内容
-- `conversation_id` (string, 可选): 对话 ID；为空则新建；建议沿用上次响应中的 `conversation_id`（与 Dify 侧会话一致）
+- `conversation_id` (string, 必需): 会话 ID（由 `/api/sessions` 创建）
 - `user_id` (string, 可选): 用户 ID，默认为 `default_user`
+- `source_id` (string, 可选): 前端当前 source；服务端会校验与会话锁定值一致（不一致返回 `409 source_locked`）
 - `files` (file[], 可选): 上传的文件/图片
 
 也支持 `Content-Type: application/json`，字段名相同（不含文件时使用）。

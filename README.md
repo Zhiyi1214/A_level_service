@@ -7,6 +7,7 @@
 ✨ **智能对话** - 与AI进行自然流畅的多轮对话
 📸 **图片支持** - 上传并分析图片内容
 💬 **对话管理** - 保存和管理多个对话历史
+🧠 **多知识库切换** - 新会话前可选知识库，会话开始后自动锁定
 🎨 **现代UI** - 响应式设计，美观易用的界面
 🔐 **安全可靠** - 完整的身份验证和数据处理
 
@@ -74,10 +75,15 @@ cp .env.example .env
 ```bash
 DIFY_API_URL=http://localhost/v1
 DIFY_API_KEY=your_actual_api_key_here
+SOURCES_CONFIG_PATH=./config/sources.json
+SRC_KB_A_API_KEY=your_kb_a_api_key_here
+SRC_KB_B_API_KEY=your_kb_b_api_key_here
 FLASK_ENV=development
 HOST=0.0.0.0
 PORT=5000
 ```
+
+`config/sources.json` 控制前端可选知识库数量和内容。新增/删除 source 后，前端会自动展示对应选项。
 
 5. **启动应用**
 ```bash

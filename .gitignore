@@ -44,6 +44,11 @@ venv.bak/
 .env.local
 .env.*.local
 
+# SSL certificates
+ssl/*.crt
+ssl/*.key
+ssl/*.pem
+
 # Uploads and temporary files
 uploads/
 tmp/
