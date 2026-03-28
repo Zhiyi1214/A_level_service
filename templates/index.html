@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Assistant - Powered by Dify</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/katex/katex.min.css') }}">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <span class="logo-icon">✨</span>
+                    <span class="logo-text">AI Assistant</span>
+                </div>
+            </div>
+
+            <button class="new-chat-btn" onclick="startNewChat()">
+                <span class="icon">+</span>
+                <span>New Chat</span>
+            </button>
+
+            <div class="conversations-list">
+                <div class="list-header">Recent Chats</div>
+                <div id="conversationsList" class="conversations-container">
+                    <div class="empty-state">No conversations yet</div>
+                </div>
+            </div>
+
+            <div class="sidebar-footer">
+                <div class="settings-info">
+                    <span>v1.0.0</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Chat Area -->
+        <main class="main-content">
+            <div class="chat-container">
+                <!-- Chat Header -->
+                <div class="chat-header">
+                    <div class="header-left">
+                        <h1 id="chatTitle">Start a new conversation</h1>
+                        <p id="chatSubtitle" class="subtitle">Ask me anything</p>
+                    </div>
+                    <div class="header-right">
+                        <button class="header-btn" onclick="toggleSidebar()" title="Toggle sidebar">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="3" y1="6" x2="21" y2="6"></line>
+                                <line x1="3" y1="12" x2="21" y2="12"></line>
+                                <line x1="3" y1="18" x2="21" y2="18"></line>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Messages Area -->
+                <div id="messagesArea" class="messages-area">
+                    <div class="welcome-section">
+                        <div class="welcome-icon">👋</div>
+                        <h2>Welcome to AI Assistant</h2>
+                        <p>Powered by Dify - Your intelligent conversation partner</p>
+                        <div class="quick-starts">
+                            <button class="quick-start-btn" onclick="sendMessage('What can you help me with?')">
+                                What can you help me with?
+                            </button>
+                            <button class="quick-start-btn" onclick="sendMessage('Tell me about your capabilities')">
+                                Tell me about your capabilities
+                            </button>
+                            <button class="quick-start-btn" onclick="sendMessage('How can I use images with my queries?')">
+                                Image support info
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="chatStatusBar" class="chat-status-bar" hidden aria-live="polite">
+                    <span class="chat-status-dot"></span>
+                    <span class="chat-status-text">generating response...</span>
+                </div>
+
+                <!-- Input Area -->
+                <div class="input-area">
+                    <div class="input-wrapper">
+                        <div class="input-toolbar">
+                            <button class="tool-btn" id="fileUploadBtn" onclick="document.getElementById('fileInput').click()" title="Attach image">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm3.5-9c.83 0 1.5-.67 1.5-1.5S16.33 8 15.5 8 14 8.67 14 9.5s.67 1.5 1.5 1.5zm-7 0c.83 0 1.5-.67 1.5-1.5S9.33 8 8.5 8 7 8.67 7 9.5 7.67 11 8.5 11zm3.5 6.5c2.33 0 4.31-1.46 5.11-3.5H6.89c.8 2.04 2.78 3.5 5.11 3.5z"/>
+                                </svg>
+                            </button>
+                            <input type="file" id="fileInput" multiple accept="image/*" style="display: none;" onchange="handleFileSelect(event)">
+                        </div>
+
+                        <div id="uploadedFiles" class="uploaded-files"></div>
+
+                        <div class="input-box">
+                            <textarea
+                                id="messageInput"
+                                class="message-input"
+                                placeholder="输入问题…（Shift+Enter 换行；连续按两次 Enter 发送）"
+                                onkeydown="handleInputKeydown(event)"
+                            ></textarea>
+                            <button class="send-btn" id="sendBtn" onclick="sendMessage()">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="input-help">
+                        💡 连续按两次 Enter 发送；生成中按钮变为「停止」。可上传图片分析。
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='vendor/katex/katex.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='script.js') }}?v=8"></script>
+</body>
+</html>
+

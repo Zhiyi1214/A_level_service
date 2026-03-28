@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  ai-assistant:
+    build: .
+    container_name: ai-assistant
+    ports:
+      - "8000:8000"
+    environment:
+      DIFY_API_URL: ${DIFY_API_URL:-http://host.docker.internal/v1}
+      DIFY_API_KEY: ${DIFY_API_KEY}
+      FLASK_ENV: ${FLASK_ENV:-production}
+      HOST: 0.0.0.0
+      PORT: 8000
+    volumes:
+      - ./uploads:/app/uploads
+      - ./.env:/app/.env
+    restart: unless-stopped
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "com.example.description=AI Assistant Backend"
+
+  # 可选：Nginx反向代理
+  nginx:
+    image: nginx:alpine
+    container_name: ai-assistant-nginx
+    ports:
+      - "8080:80"
+      - "8443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - ai-assistant
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+networks:
+  ai-network:
+    driver: bridge
+
