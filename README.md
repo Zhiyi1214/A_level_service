@@ -74,16 +74,15 @@ cp .env.example .env
 编辑 `.env` 文件，填入你的配置：
 ```bash
 DIFY_API_URL=http://localhost/v1
-DIFY_API_KEY=your_actual_api_key_here
 SOURCES_CONFIG_PATH=./config/sources.json
-SRC_KB_A_API_KEY=your_kb_a_api_key_here
-SRC_KB_B_API_KEY=your_kb_b_api_key_here
+API_KAY_A=your_API_KEY_FOR_WORKFLOW_B
+API_KEY_B=your_API_KEY_FOR_WORKFLOW_A
 FLASK_ENV=development
 HOST=0.0.0.0
 PORT=5000
 ```
 
-`config/sources.json` 控制前端可选知识库数量和内容。新增/删除 source 后，前端会自动展示对应选项。
+`config/sources.json` 控制前端可选知识库数量和内容。新增/删除 source 后，需要在env中更新每一个工作流的api kay，api key的数量取决于source数量，演示代码是两个source的情况，配置完成后前端会自动展示对应选项。
 
 5. **启动应用**
 ```bash
