@@ -50,7 +50,7 @@
 
 1. **克隆或进入项目目录**
 ```bash
-cd /Users/ray_zhang/Developer/A_level
+cd /yourpath/A_level
 ```
 
 2. **创建虚拟环境（推荐）**
