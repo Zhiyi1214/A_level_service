@@ -363,5 +363,5 @@ A: 当前使用内存存储，可集成数据库（如SQLite、PostgreSQL）
 
 **创建时间**: 2026年3月20日
 **版本**: 1.0.0
-**维护者**: AI Development Team
+**维护者**: Zhiyi Zhang
 
