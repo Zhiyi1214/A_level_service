@@ -10,17 +10,21 @@
 - **Markdown + LaTeX** — 助手回复支持公式渲染（KaTeX）
 - **深色 / 浅色主题** — 一键切换
 - **响应式布局** — 桌面 / 平板 / 手机自适应
+- **Google 登录（可选）** — 配置 OAuth 后按会话隔离对话；未配置时仍为匿名 `user_id` 模式
 
 ## 项目结构
 
 ```
 A_level/
 ├── app.py                  # Flask 入口：初始化、蓝图注册、错误处理
-├── extensions.py           # Limiter / CORS / ProxyFix
+├── extensions.py           # Limiter / CORS / ProxyFix / OAuth（可选）
+├── auth/
+│   └── context.py          # Session user_id、匿名与 OAuth 模式下的身份解析
 ├── config/
 │   ├── settings.py         # 集中管理所有环境变量
 │   └── sources.json        # 知识库定义（id / api_url / auth_ref）
 ├── routes/
+│   ├── auth_routes.py      # Google OAuth、/api/me、登出
 │   ├── chat.py             # POST /api/sessions, /api/chat
 │   ├── conversations.py    # GET/DELETE /api/conversations
 │   └── sources.py          # GET /api/sources
@@ -74,6 +78,21 @@ DIFY_API_KEY_EDX=app-xxxxxxxxxxxx
 
 知识库列表由 `config/sources.json` 控制。增删 source 后在 `.env` 中添加对应的 API key 即可，前端自动展示。
 
+### Google 登录（可选）
+
+在 [Google Cloud Console](https://console.cloud.google.com/) 创建 OAuth 2.0 客户端（Web），将**已授权的重定向 URI**设为：
+
+你的应用对外可访问的回调地址，例如 `https://your-domain/auth/google/callback` 或本地 `http://127.0.0.1:5000/auth/google/callback`。须与 `.env` 中 `GOOGLE_REDIRECT_URI`（若填写）以及实际访问入口一致。
+
+在 `.env` 中设置：
+
+- `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`
+- `GOOGLE_REDIRECT_URI`（可选）：填写后与 Google Console 完全一致；若留空，服务按**当前请求**动态生成回调地址（反向代理后请优先使用显式 `GOOGLE_REDIRECT_URI`）
+
+启用 OAuth 后，对话相关接口使用 **Flask Session** 识别用户，不再信任请求体中的 `user_id`。生产环境 HTTPS 建议设置 `SESSION_COOKIE_SECURE=true`；如果你在本地 `http://localhost` 调试，保持 `false` 或留空，否则浏览器不会发送登录后的 Session Cookie。
+
+扩展其他登录方式时，可向 `user_identities` 表写入新的 `provider` / `provider_subject`，并与当前 Session 写入同一套 `user_id`。
+
 ### 3. 启动
 
 ```bash
@@ -104,6 +123,10 @@ docker compose up -d
 | 方法 | 端点 | 说明 |
 |------|------|------|
 | GET | `/api/sources` | 获取可用知识库列表 |
+| GET | `/api/me` | 当前登录态与 OAuth 是否启用 |
+| GET | `/auth/google` | 跳转 Google 授权 |
+| GET | `/auth/google/callback` | OAuth 回调（写入 Session） |
+| POST | `/auth/logout` | 清除 Session |
 | POST | `/api/sessions` | 创建会话（锁定知识库） |
 | POST | `/api/chat` | 发送消息（支持 multipart 图片上传） |
 | GET | `/api/conversations` | 获取对话列表 |
@@ -112,6 +135,8 @@ docker compose up -d
 | GET | `/api/health` | 健康检查 |
 
 ### 示例
+
+未启用 Google OAuth 时，可用 `user_id` 区分匿名用户：
 
 ```bash
 # 创建会话
@@ -131,6 +156,8 @@ curl -X POST http://localhost:5000/api/chat \
   -F "files=@mechanism.jpg" \
   -F "conversation_id=<session_id>"
 ```
+
+启用 OAuth 后，上述接口需携带登录后的 **Session Cookie**（例如浏览器先完成 `/auth/google` 流程，或使用 `curl -b/-c` 保存 cookie）。
 
 ## 配置参考
 

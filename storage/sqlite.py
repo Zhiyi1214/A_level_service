@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,27 @@ class SQLiteStore:
                 ON conversations(user_id);
             CREATE INDEX IF NOT EXISTS idx_msg_conv
                 ON messages(conversation_id);
+
+            CREATE TABLE IF NOT EXISTS users (
+                id           TEXT PRIMARY KEY,
+                email        TEXT,
+                display_name TEXT,
+                avatar_url   TEXT,
+                created_at   TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_identities (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id           TEXT    NOT NULL,
+                provider          TEXT    NOT NULL,
+                provider_subject  TEXT    NOT NULL,
+                created_at        TEXT    NOT NULL,
+                UNIQUE (provider, provider_subject),
+                FOREIGN KEY (user_id)
+                    REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_identities_user
+                ON user_identities(user_id);
         """)
         conn.commit()
 
@@ -219,6 +241,66 @@ class SQLiteStore:
 
     def get_image_cache(self, session_id: str) -> list:
         return self._image_cache.get(session_id, [])
+
+    # ------------------------------------------------------------------
+    # Users & external identities (OAuth / future providers)
+    # ------------------------------------------------------------------
+
+    def get_user(self, user_id: str) -> dict | None:
+        row = self._conn().execute(
+            "SELECT id, email, display_name, avatar_url, created_at"
+            " FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            'id': row['id'],
+            'email': row['email'] or '',
+            'display_name': row['display_name'] or '',
+            'avatar_url': row['avatar_url'] or '',
+            'created_at': row['created_at'],
+        }
+
+    def upsert_user_from_provider(
+        self,
+        provider: str,
+        provider_subject: str,
+        email: str | None,
+        display_name: str | None,
+        avatar_url: str | None,
+    ) -> str:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT user_id FROM user_identities"
+            " WHERE provider = ? AND provider_subject = ?",
+            (provider, provider_subject),
+        ).fetchone()
+        now = datetime.now().isoformat()
+        if row:
+            uid = row['user_id']
+            conn.execute(
+                "UPDATE users SET email = ?, display_name = ?, avatar_url = ?"
+                " WHERE id = ?",
+                (email, display_name, avatar_url, uid),
+            )
+            conn.commit()
+            return uid
+
+        uid = str(uuid.uuid4())
+        conn.execute(
+            "INSERT INTO users (id, email, display_name, avatar_url, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (uid, email, display_name, avatar_url, now),
+        )
+        conn.execute(
+            "INSERT INTO user_identities"
+            " (user_id, provider, provider_subject, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (uid, provider, provider_subject, now),
+        )
+        conn.commit()
+        return uid
 
 
 # ------------------------------------------------------------------

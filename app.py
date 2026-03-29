@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template, send_from_directory
@@ -15,6 +15,10 @@ from storage import store
 # ---------------------------------------------------------------------------
 app = Flask(__name__, template_folder='templates', static_folder='static')
 app.secret_key = settings.SECRET_KEY
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=14)
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = settings.SESSION_COOKIE_SECURE
 app.config['MAX_CONTENT_LENGTH'] = settings.MAX_CONTENT_LENGTH
 app.config['UPLOAD_FOLDER'] = settings.UPLOAD_FOLDER
 
@@ -28,10 +32,12 @@ init_extensions(app)
 # ---------------------------------------------------------------------------
 # Register blueprints
 # ---------------------------------------------------------------------------
+from routes.auth_routes import auth_bp    # noqa: E402
 from routes.chat import chat_bp           # noqa: E402
 from routes.conversations import conversations_bp  # noqa: E402
 from routes.sources import sources_bp     # noqa: E402
 
+app.register_blueprint(auth_bp)
 app.register_blueprint(chat_bp)
 app.register_blueprint(conversations_bp)
 app.register_blueprint(sources_bp)

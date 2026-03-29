@@ -24,7 +24,7 @@ FLASK_ENV = os.getenv('FLASK_ENV', 'production')
 HOST = os.getenv('HOST', '0.0.0.0')
 PORT = int(os.getenv('PORT', 5000))
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-FRONTEND_VERSION = os.getenv('FRONTEND_VERSION', '29')
+FRONTEND_VERSION = os.getenv('FRONTEND_VERSION', '41')
 
 # ---------------------------------------------------------------------------
 # CORS
@@ -67,3 +67,18 @@ MAX_COMPRESSED_IMAGE_BYTES = int(os.getenv('MAX_COMPRESSED_IMAGE_BYTES', 1_500_0
 # Storage
 # ---------------------------------------------------------------------------
 DATABASE_PATH = str(BASE_DIR / 'data' / 'conversations.db')
+
+# ---------------------------------------------------------------------------
+# OAuth (Google) — 与 Google Cloud Console 中「已授权的重定向 URI」须完全一致
+# ---------------------------------------------------------------------------
+GOOGLE_CLIENT_ID = (os.getenv('GOOGLE_CLIENT_ID') or '').strip()
+GOOGLE_CLIENT_SECRET = (os.getenv('GOOGLE_CLIENT_SECRET') or '').strip()
+GOOGLE_REDIRECT_URI_EXPLICIT = (os.getenv('GOOGLE_REDIRECT_URI') or '').strip()
+OAUTH_CONFIGURED = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
+
+# 生产环境 HTTPS 下建议设为 true，否则浏览器可能不发送 Session Cookie
+SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', '').lower() in (
+    '1',
+    'true',
+    'yes',
+)

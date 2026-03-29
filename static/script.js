@@ -1,13 +1,15 @@
 // Global state
 let currentConversationId = null;
 let uploadedFiles = [];
-const userId = 'user_' + Math.random().toString(36).slice(2, 11);
+let oauthConfigured = false;
+let authUser = null;
+const anonymousUserId = 'user_' + Math.random().toString(36).slice(2, 11);
 let lastEnterDownMs = 0;
 let sendBtnDefaultHtml = '';
 let availableSources = [];
 let selectedSourceId = '';
-const THEME_STORAGE_KEY = 'a_level_theme';
-const SIDEBAR_COLLAPSED_STORAGE_KEY = 'a_level_sidebar_collapsed';
+const THEME_STORAGE_KEY = 'a_level_theme_v38';
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'a_level_sidebar_collapsed_v38';
 const MAX_UPLOAD_IMAGES = 3;
 const conversationStates = new Map();
 
@@ -39,6 +41,155 @@ function setCurrentConversation(conversationId) {
 function getCurrentPendingCount() {
     const state = getCurrentConversationState();
     return state ? state.pendingCount : 0;
+}
+
+function conversationsQueryString() {
+    if (oauthConfigured) {
+        return '';
+    }
+    return `?user_id=${encodeURIComponent(anonymousUserId)}`;
+}
+
+async function initAuth() {
+    const authStatus = getOAuthReturnStatus();
+    try {
+        await refreshAuthState();
+        if (authStatus === 'ok' && oauthConfigured && !authUser) {
+            await new Promise(resolve => window.setTimeout(resolve, 250));
+            await refreshAuthState();
+        }
+    } catch (e) {
+        console.warn('initAuth failed:', e);
+        oauthConfigured = false;
+        authUser = null;
+    }
+    applyAuthView(authStatus);
+    renderAuthPanel();
+    consumeOAuthReturnStatus(authStatus);
+}
+
+async function refreshAuthState() {
+    const response = await fetch('/api/me', {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: {
+            'Cache-Control': 'no-cache'
+        }
+    });
+    const data = await response.json();
+    oauthConfigured = !!data.oauth_configured;
+    authUser = data.authenticated && data.user ? data.user : null;
+}
+
+function getOAuthReturnStatus() {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('auth');
+}
+
+function isAuthGateActive() {
+    return oauthConfigured && !authUser;
+}
+
+function applyAuthView(authStatus = '') {
+    const loginScreen = document.getElementById('loginScreen');
+    const loginMessage = document.getElementById('loginScreenMessage');
+    const appContainer = document.querySelector('.app-container');
+    const gateActive = isAuthGateActive();
+
+    if (document.body) {
+        document.body.classList.toggle('auth-gated', gateActive);
+    }
+    if (loginScreen) {
+        loginScreen.classList.toggle('login-screen--hidden', !gateActive);
+    }
+    if (appContainer) {
+        appContainer.classList.toggle('app-container--hidden', gateActive);
+    }
+    if (loginMessage) {
+        let message = '';
+        if (authStatus === 'ok' && gateActive) {
+            message = '登录回调已完成，但当前会话未生效。';
+        } else if (authStatus === 'error') {
+            message = 'Google 登录失败，请重试。';
+        }
+        loginMessage.textContent = message;
+        loginMessage.classList.toggle('login-screen-message--hidden', !message);
+    }
+}
+
+function consumeOAuthReturnStatus(authStatus = '') {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        if (!authStatus) {
+            return;
+        }
+        params.delete('auth');
+        const q = params.toString();
+        const path = window.location.pathname + (q ? '?' + q : '') + window.location.hash;
+        window.history.replaceState({}, '', path);
+    } catch (e) {
+        /* ignore */
+    }
+}
+
+function renderAuthPanel() {
+    const panel = document.getElementById('authPanel');
+    if (!panel) {
+        return;
+    }
+    panel.classList.remove('auth-panel--login-cta', 'auth-panel--user-state');
+    if (!oauthConfigured || !authUser) {
+        panel.innerHTML = '';
+        panel.classList.add('auth-panel--hidden');
+        return;
+    }
+    panel.classList.remove('auth-panel--hidden');
+    panel.classList.add('auth-panel--user-state');
+    const label = authUser.display_name || authUser.email || '已登录';
+    const title = authUser.email || '';
+    panel.innerHTML = `
+        <div class="sidebar-capsule sidebar-capsule--auth">
+            <div class="auth-panel-inner">
+                <span class="auth-panel-user" title="${escapeHtml(title)}">${escapeHtml(label)}</span>
+                <button type="button" class="auth-panel-logout" id="authLogoutBtn">退出</button>
+            </div>
+        </div>`;
+    const btn = document.getElementById('authLogoutBtn');
+    if (btn) {
+        btn.addEventListener('click', () => { logoutAuth(); });
+    }
+}
+
+function renderSidebarStatus(message = '') {
+    const status = document.getElementById('sidebarStatus');
+    const conversationsList = document.querySelector('.conversations-list');
+    if (!status) {
+        return;
+    }
+
+    const nextMessage = message.trim();
+    status.textContent = nextMessage;
+    status.classList.toggle('sidebar-status--hidden', !nextMessage);
+    if (conversationsList) {
+        conversationsList.classList.toggle('conversations-list--status-visible', !!nextMessage);
+    }
+}
+
+async function logoutAuth() {
+    try {
+        await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' });
+    } catch (e) {
+        console.warn('logout failed:', e);
+    }
+    conversationStates.clear();
+    authUser = null;
+    currentConversationId = null;
+    selectedSourceId = '';
+    availableSources = [];
+    renderSidebarStatus('');
+    renderAuthPanel();
+    applyAuthView('');
+    startNewChat();
 }
 
 function setConversationServerData(conversationId, conv) {
@@ -101,9 +252,8 @@ function renderConversationView(conversationId) {
 }
 
 // Initialize app
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', async function() {
     console.log('🚀 AI Assistant initialized');
-    console.log('👤 User ID:', userId);
     try {
         if (typeof marked !== 'undefined' && typeof marked.setOptions === 'function') {
             marked.setOptions({ gfm: true, breaks: true });
@@ -115,12 +265,18 @@ document.addEventListener('DOMContentLoaded', function() {
     if (sb) {
         sendBtnDefaultHtml = sb.innerHTML;
     }
+    await initAuth();
+    if (!oauthConfigured) {
+        console.log('👤 Anonymous user:', anonymousUserId);
+    }
     initTheme();
     initSidebarState();
     syncSendBtn();
-    loadSources();
-    loadConversations();
     setupEventListeners();
+    if (!isAuthGateActive()) {
+        loadSources();
+        loadConversations();
+    }
 });
 
 function renderWelcomeState() {
@@ -385,7 +541,7 @@ function stopChatRequest() {
 function setupEventListeners() {
     const messageInput = document.getElementById('messageInput');
     const sidebar = document.querySelector('.sidebar');
-    const mobileMenuBtn = document.querySelector('.mobile-menu-btn');
+    const shellRail = document.querySelector('.shell-rail');
     const appContainer = document.querySelector('.app-container');
     
     messageInput.addEventListener('input', function() {
@@ -409,10 +565,13 @@ function setupEventListeners() {
     });
 
     document.addEventListener('click', function(event) {
-        if (!isMobileViewport() || !isSidebarOpen() || !sidebar || !mobileMenuBtn) {
+        if (!isMobileViewport() || !isSidebarOpen() || !sidebar) {
             return;
         }
-        if (sidebar.contains(event.target) || mobileMenuBtn.contains(event.target)) {
+        if (
+            sidebar.contains(event.target)
+            || (shellRail && shellRail.contains(event.target))
+        ) {
             return;
         }
         closeSidebar();
@@ -446,6 +605,7 @@ function onSourceChange() {
     }
     const select = document.getElementById('sourceSelect');
     selectedSourceId = select ? select.value : '';
+    updateCurrentSourceTitle();
 }
 
 function setSourceLocked(locked) {
@@ -476,11 +636,12 @@ function renderSourceOptions() {
         select.value = '';
     }
     setSourceLocked(!!currentConversationId);
+    updateCurrentSourceTitle();
 }
 
 async function loadSources() {
     try {
-        const response = await fetch('/api/sources');
+        const response = await fetch('/api/sources', { credentials: 'same-origin' });
         const data = await response.json();
         if (response.ok && data.success && Array.isArray(data.sources)) {
             availableSources = data.sources.filter(s => s && s.enabled !== false);
@@ -496,18 +657,24 @@ async function loadSources() {
 
 async function ensureSessionReady() {
     if (currentConversationId) return true;
+    if (oauthConfigured && !authUser) {
+        addMessageToUI('assistant', '❌ 请先使用侧栏的 Google 登录后再开始对话。');
+        return false;
+    }
     if (!selectedSourceId) {
         addMessageToUI('assistant', '❌ 请先选择知识库再开始对话。');
         return false;
     }
     try {
+        const payload = { source_id: selectedSourceId };
+        if (!oauthConfigured) {
+            payload.user_id = anonymousUserId;
+        }
         const response = await fetch('/api/sessions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                source_id: selectedSourceId,
-                user_id: userId
-            })
+            credentials: 'same-origin',
+            body: JSON.stringify(payload)
         });
         const data = await response.json();
         if (!response.ok || !data.success) {
@@ -525,6 +692,7 @@ async function ensureSessionReady() {
         setSourceLocked(true);
         syncSendBtn();
         loadConversations();
+        updateCurrentSourceTitle();
         return true;
     } catch (error) {
         addMessageToUI('assistant', '❌ 创建会话失败：' + (error && error.message ? error.message : String(error)));
@@ -535,7 +703,18 @@ async function ensureSessionReady() {
 // Load conversations from backend
 async function loadConversations() {
     try {
-        const response = await fetch(`/api/conversations?user_id=${encodeURIComponent(userId)}`);
+        if (oauthConfigured && !authUser) {
+            const container = document.getElementById('conversationsList');
+            if (container) {
+                container.innerHTML = '';
+            }
+            renderSidebarStatus('登录后查看会话');
+            return;
+        }
+        renderSidebarStatus('');
+        const response = await fetch(`/api/conversations${conversationsQueryString()}`, {
+            credentials: 'same-origin'
+        });
         if (!response.ok) return;
         const data = await response.json();
         const container = document.getElementById('conversationsList');
@@ -603,7 +782,8 @@ function startNewChat() {
     resetComposer();
     renderSourceOptions();
     setSourceLocked(false);
-    
+    updateCurrentSourceTitle();
+
     const messagesArea = document.getElementById('messagesArea');
     messagesArea.innerHTML = renderWelcomeState();
     closeSidebar();
@@ -619,7 +799,10 @@ async function switchConversation(conversationId) {
     renderConversationView(conversationId);
     closeSidebar();
     try {
-        const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}?user_id=${encodeURIComponent(userId)}`);
+        const response = await fetch(
+            `/api/conversations/${encodeURIComponent(conversationId)}${conversationsQueryString()}`,
+            { credentials: 'same-origin' }
+        );
         if (!response.ok) {
             console.error('Error loading conversation: HTTP', response.status);
             return;
@@ -639,6 +822,7 @@ async function switchConversation(conversationId) {
         }
         setSourceLocked(true);
         renderConversationView(conversationId);
+        updateCurrentSourceTitle();
         loadConversations();
     } catch (error) {
         console.error('Error loading conversation:', error);
@@ -653,6 +837,31 @@ function getConversationSourceId(conversationId) {
     return state.serverConversation.source_id || '';
 }
 
+function getSourceDisplayName(sourceId) {
+    if (!sourceId) {
+        return '';
+    }
+    const s = availableSources.find(x => x && x.id === sourceId);
+    return s ? String(s.name || s.id) : sourceId;
+}
+
+function updateCurrentSourceTitle() {
+    const el = document.getElementById('currentSourceTitle');
+    if (!el) {
+        return;
+    }
+    let label = '选择知识库';
+    if (currentConversationId) {
+        const sid = getConversationSourceId(currentConversationId);
+        if (sid) {
+            label = getSourceDisplayName(sid);
+        }
+    } else if (selectedSourceId) {
+        label = getSourceDisplayName(selectedSourceId);
+    }
+    el.textContent = label;
+}
+
 // Delete conversation
 async function deleteConversation(conversationId, event) {
     event.stopPropagation();
@@ -662,9 +871,10 @@ async function deleteConversation(conversationId, event) {
     }
     
     try {
-        const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}?user_id=${encodeURIComponent(userId)}`, {
-            method: 'DELETE'
-        });
+        const response = await fetch(
+            `/api/conversations/${encodeURIComponent(conversationId)}${conversationsQueryString()}`,
+            { method: 'DELETE', credentials: 'same-origin' }
+        );
         
         if (response.ok) {
             if (currentConversationId === conversationId) {
@@ -692,9 +902,7 @@ function queueUploadedFiles(files, options = {}) {
     for (let file of files || []) {
         if (!file) continue;
         if (!file.type || !file.type.startsWith('image/')) {
-            if (fromClipboard) {
-                continue;
-            }
+            continue;
         }
         // Check file size (max 50MB)
         if (file.size > 52428800) {
@@ -817,7 +1025,9 @@ async function postChatMessage({ message, files, controller, conversationId, sou
     const formData = new FormData();
     formData.append('message', message);
     formData.append('conversation_id', conversationId || '');
-    formData.append('user_id', userId);
+    if (!oauthConfigured) {
+        formData.append('user_id', anonymousUserId);
+    }
     formData.append('source_id', sourceId || '');
 
     (files || []).forEach(file => {
@@ -827,6 +1037,7 @@ async function postChatMessage({ message, files, controller, conversationId, sou
     return fetch('/api/chat', {
         method: 'POST',
         body: formData,
+        credentials: 'same-origin',
         signal: controller.signal
     });
 }
@@ -849,7 +1060,10 @@ function tryParseJsonResponse(rawText, status) {
 async function refreshConversationFromServer(conversationId) {
     if (!conversationId) return;
     try {
-        const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}?user_id=${encodeURIComponent(userId)}`);
+        const response = await fetch(
+            `/api/conversations/${encodeURIComponent(conversationId)}${conversationsQueryString()}`,
+            { credentials: 'same-origin' }
+        );
         if (!response.ok) {
             return;
         }
@@ -861,6 +1075,7 @@ async function refreshConversationFromServer(conversationId) {
         if (currentConversationId === conversationId) {
             renderConversationView(conversationId);
             syncSendBtn();
+            updateCurrentSourceTitle();
         }
     } catch (error) {
         console.error('Error refreshing conversation:', error);
@@ -988,6 +1203,7 @@ async function sendMessage() {
             }
             loadConversations();
             updateActiveConversation();
+            updateCurrentSourceTitle();
         } else {
             const detail = data.detail ? ` (${data.detail})` : '';
             failPendingMessage(requestConversationId, requestId, '❌ Error: ' + (data.error || 'Failed to get response') + detail);
@@ -1171,21 +1387,18 @@ function isDesktopSidebarCollapsed() {
 }
 
 function syncSidebarButtons() {
-    const mobileMenuBtn = document.querySelector('.mobile-menu-btn');
     const collapseBtn = document.getElementById('sidebarCollapseBtn');
     const mobileOpen = isSidebarOpen();
     const desktopCollapsed = isDesktopSidebarCollapsed();
 
-    if (mobileMenuBtn) {
-        const expanded = isMobileViewport() ? mobileOpen : !desktopCollapsed;
-        mobileMenuBtn.setAttribute('aria-expanded', String(expanded));
-        mobileMenuBtn.title = desktopCollapsed ? '展开侧边栏' : '切换侧边栏';
-        mobileMenuBtn.setAttribute('aria-label', mobileMenuBtn.title);
-    }
-
     if (collapseBtn) {
-        collapseBtn.title = desktopCollapsed ? '展开侧边栏' : '收起侧边栏';
-        collapseBtn.setAttribute('aria-label', collapseBtn.title);
+        if (isMobileViewport()) {
+            collapseBtn.title = mobileOpen ? '收起会话列表' : '打开会话列表';
+            collapseBtn.setAttribute('aria-label', collapseBtn.title);
+        } else {
+            collapseBtn.title = desktopCollapsed ? '展开侧边栏' : '收起侧边栏';
+            collapseBtn.setAttribute('aria-label', collapseBtn.title);
+        }
     }
 }
 

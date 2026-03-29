@@ -4,6 +4,7 @@ from datetime import datetime
 
 from flask import Blueprint, jsonify, request
 
+from auth.context import effective_user_id, oauth_login_required_response
 from config import settings
 from extensions import limiter
 from services import chat_service, image_service
@@ -21,7 +22,9 @@ def create_session():
     try:
         data = request.get_json(silent=True, force=False) or {}
         source_id = (data.get('source_id') or '').strip()
-        user_id = (data.get('user_id') or 'default_user').strip() or 'default_user'
+        user_id = effective_user_id()
+        if settings.OAUTH_CONFIGURED and not user_id:
+            return oauth_login_required_response()
 
         source = source_service.get(source_id)
         if not source:
@@ -54,13 +57,15 @@ def chat():
         if data is not None:
             user_message = (data.get('message') or '').strip()
             conversation_id = (data.get('conversation_id') or '').strip()
-            user_id = (data.get('user_id') or 'default_user').strip() or 'default_user'
             source_id = (data.get('source_id') or '').strip()
         else:
             user_message = (request.form.get('message') or '').strip()
             conversation_id = (request.form.get('conversation_id') or '').strip()
-            user_id = (request.form.get('user_id') or 'default_user').strip() or 'default_user'
             source_id = (request.form.get('source_id') or '').strip()
+
+        user_id = effective_user_id()
+        if settings.OAUTH_CONFIGURED and not user_id:
+            return oauth_login_required_response()
 
         # ----- validate -----
         if not user_message:
@@ -83,6 +88,9 @@ def chat():
                 'error': 'Conversation not found',
                 'detail': 'Session expired or invalid conversation_id.',
             }), 404
+
+        if settings.OAUTH_CONFIGURED and session.get('user_id') != user_id:
+            return jsonify({'error': 'Forbidden', 'detail': 'Not your conversation.'}), 403
 
         locked_source_id = session['source_id']
 
