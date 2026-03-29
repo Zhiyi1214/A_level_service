@@ -9,6 +9,7 @@ let sendBtnDefaultHtml = '';
 let availableSources = [];
 let selectedSourceId = '';
 const THEME_STORAGE_KEY = 'a_level_theme';
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'a_level_sidebar_collapsed';
 
 // Initialize app
 document.addEventListener('DOMContentLoaded', function() {
@@ -26,6 +27,7 @@ document.addEventListener('DOMContentLoaded', function() {
         sendBtnDefaultHtml = sb.innerHTML;
     }
     initTheme();
+    initSidebarState();
     syncSendBtn();
     loadSources();
     loadConversations();
@@ -313,10 +315,41 @@ function stopChatRequest() {
 // Setup event listeners
 function setupEventListeners() {
     const messageInput = document.getElementById('messageInput');
+    const sidebar = document.querySelector('.sidebar');
+    const mobileMenuBtn = document.querySelector('.mobile-menu-btn');
+    const appContainer = document.querySelector('.app-container');
     
     messageInput.addEventListener('input', function() {
         this.style.height = 'auto';
         this.style.height = Math.max(44, Math.min(this.scrollHeight, 140)) + 'px';
+    });
+
+    document.addEventListener('click', function(event) {
+        if (!isMobileViewport() || !isSidebarOpen() || !sidebar || !mobileMenuBtn) {
+            return;
+        }
+        if (sidebar.contains(event.target) || mobileMenuBtn.contains(event.target)) {
+            return;
+        }
+        closeSidebar();
+    });
+
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape' && isSidebarOpen()) {
+            closeSidebar();
+        }
+    });
+
+    window.addEventListener('resize', function() {
+        if (isMobileViewport()) {
+            if (appContainer) {
+                appContainer.classList.remove('sidebar-collapsed');
+            }
+            syncSidebarButtons();
+        } else {
+            closeSidebar();
+            syncSidebarButtons();
+        }
     });
 }
 
@@ -746,6 +779,7 @@ function closeSidebar() {
     if (sidebar) {
         sidebar.classList.remove('show');
     }
+    syncSidebarButtons();
 }
 
 function scrollMessagesToBottom() {
@@ -878,10 +912,92 @@ function updateActiveConversation() {
     });
 }
 
-// Toggle sidebar on mobile
-function toggleSidebar() {
+function isMobileViewport() {
+    return window.innerWidth <= 768;
+}
+
+function isSidebarOpen() {
     const sidebar = document.querySelector('.sidebar');
-    sidebar.classList.toggle('show');
+    return !!(sidebar && sidebar.classList.contains('show'));
+}
+
+function isDesktopSidebarCollapsed() {
+    const appContainer = document.querySelector('.app-container');
+    return !!(appContainer && appContainer.classList.contains('sidebar-collapsed'));
+}
+
+function syncSidebarButtons() {
+    const mobileMenuBtn = document.querySelector('.mobile-menu-btn');
+    const collapseBtn = document.getElementById('sidebarCollapseBtn');
+    const mobileOpen = isSidebarOpen();
+    const desktopCollapsed = isDesktopSidebarCollapsed();
+
+    if (mobileMenuBtn) {
+        const expanded = isMobileViewport() ? mobileOpen : !desktopCollapsed;
+        mobileMenuBtn.setAttribute('aria-expanded', String(expanded));
+        mobileMenuBtn.title = desktopCollapsed ? '展开侧边栏' : '切换侧边栏';
+        mobileMenuBtn.setAttribute('aria-label', mobileMenuBtn.title);
+    }
+
+    if (collapseBtn) {
+        const collapsed = desktopCollapsed;
+        collapseBtn.title = collapsed ? '展开侧边栏' : '收起侧边栏';
+        collapseBtn.setAttribute('aria-label', collapseBtn.title);
+    }
+}
+
+function setDesktopSidebarCollapsed(collapsed, options = {}) {
+    const appContainer = document.querySelector('.app-container');
+    if (!appContainer || isMobileViewport()) {
+        return;
+    }
+    appContainer.classList.toggle('sidebar-collapsed', !!collapsed);
+    syncSidebarButtons();
+
+    if (options.persist === false) {
+        return;
+    }
+    try {
+        localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? '1' : '0');
+    } catch (e) {
+        console.warn('Sidebar state persistence skipped:', e);
+    }
+}
+
+function initSidebarState() {
+    if (isMobileViewport()) {
+        syncSidebarButtons();
+        return;
+    }
+
+    let collapsed = false;
+    try {
+        collapsed = localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === '1';
+    } catch (e) {
+        console.warn('Sidebar state read skipped:', e);
+    }
+    setDesktopSidebarCollapsed(collapsed, { persist: false });
+}
+
+function toggleDesktopSidebar() {
+    if (isMobileViewport()) {
+        toggleSidebar();
+        return;
+    }
+    setDesktopSidebarCollapsed(!isDesktopSidebarCollapsed());
+}
+
+function toggleSidebar() {
+    if (isMobileViewport()) {
+        const sidebar = document.querySelector('.sidebar');
+        const nextOpen = !(sidebar && sidebar.classList.contains('show'));
+        if (sidebar) {
+            sidebar.classList.toggle('show', nextOpen);
+        }
+        syncSidebarButtons();
+        return;
+    }
+    setDesktopSidebarCollapsed(!isDesktopSidebarCollapsed());
 }
 
 

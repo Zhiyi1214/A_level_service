@@ -36,6 +36,7 @@ limiter = Limiter(
 app.config['MAX_CONTENT_LENGTH'] = int(os.getenv('MAX_CONTENT_LENGTH', 52428800))
 app.config['UPLOAD_FOLDER'] = os.getenv('UPLOAD_FOLDER', './uploads')
 ALLOWED_EXTENSIONS = set(os.getenv('ALLOWED_EXTENSIONS', 'jpg,jpeg,png,gif,webp,pdf,txt,doc,docx').split(','))
+FRONTEND_VERSION = os.getenv('FRONTEND_VERSION', '19')
 
 DIFY_API_URL = (os.getenv('DIFY_API_URL') or 'http://localhost/v1').rstrip('/')
 SOURCES_CONFIG_PATH = Path(os.getenv('SOURCES_CONFIG_PATH', './config/sources.json'))
@@ -266,7 +267,7 @@ def get_image_mime_type(filename):
 @app.route('/')
 def index():
     """Serve the main HTML page"""
-    return render_template('index.html')
+    return render_template('index.html', frontend_version=FRONTEND_VERSION)
 
 
 @app.route('/api/sources', methods=['GET'])
