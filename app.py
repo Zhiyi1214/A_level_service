@@ -4,6 +4,8 @@ import json
 import logging
 import secrets
 import uuid
+import hashlib
+import io
 import requests
 import base64
 from datetime import datetime
@@ -15,6 +17,7 @@ from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
+from PIL import Image, ImageOps
 
 load_dotenv(dotenv_path=Path(__file__).with_name('.env'), override=False)
 
@@ -36,7 +39,7 @@ limiter = Limiter(
 app.config['MAX_CONTENT_LENGTH'] = int(os.getenv('MAX_CONTENT_LENGTH', 52428800))
 app.config['UPLOAD_FOLDER'] = os.getenv('UPLOAD_FOLDER', './uploads')
 ALLOWED_EXTENSIONS = set(os.getenv('ALLOWED_EXTENSIONS', 'jpg,jpeg,png,gif,webp,pdf,txt,doc,docx').split(','))
-FRONTEND_VERSION = os.getenv('FRONTEND_VERSION', '19')
+FRONTEND_VERSION = os.getenv('FRONTEND_VERSION', '29')
 
 DIFY_API_URL = (os.getenv('DIFY_API_URL') or 'http://localhost/v1').rstrip('/')
 SOURCES_CONFIG_PATH = Path(os.getenv('SOURCES_CONFIG_PATH', './config/sources.json'))
@@ -47,7 +50,13 @@ Path(app.config['UPLOAD_FOLDER']).mkdir(parents=True, exist_ok=True)
 
 MAX_MESSAGE_LENGTH = int(os.getenv('MAX_MESSAGE_LENGTH', 10000))
 MAX_CONVERSATIONS_PER_USER = int(os.getenv('MAX_CONVERSATIONS_PER_USER', 50))
+MAX_UPSTREAM_IMAGES = int(os.getenv('MAX_UPSTREAM_IMAGES', 3))
+MAX_IMAGE_SIDE = int(os.getenv('MAX_IMAGE_SIDE', 1600))
+IMAGE_JPEG_QUALITY = int(os.getenv('IMAGE_JPEG_QUALITY', 82))
+MAX_COMPRESSED_IMAGE_BYTES = int(os.getenv('MAX_COMPRESSED_IMAGE_BYTES', 1_500_000))
 
+# In-memory sessions are process-local; keep a single worker unless you move
+# this state to shared storage such as Redis or a database.
 conversations = {}
 source_registry = {}
 
@@ -264,6 +273,97 @@ def get_image_mime_type(filename):
     return mime_types.get(ext, 'image/jpeg')
 
 
+def compress_image_bytes(filename, raw_bytes):
+    """Resize/compress a single image before upstream upload."""
+    suffix = Path(filename).suffix.lower()
+    if suffix == '.gif':
+        return filename, 'image/gif', raw_bytes
+
+    try:
+        with Image.open(io.BytesIO(raw_bytes)) as img:
+            img = ImageOps.exif_transpose(img)
+            max_side = max(img.size) if img.size else 0
+            if max_side and max_side > MAX_IMAGE_SIDE:
+                scale = MAX_IMAGE_SIDE / float(max_side)
+                next_size = (
+                    max(1, int(img.size[0] * scale)),
+                    max(1, int(img.size[1] * scale))
+                )
+                img = img.resize(next_size, Image.Resampling.LANCZOS)
+
+            stem = Path(filename).stem or 'image'
+            has_alpha = img.mode in ('RGBA', 'LA') or ('transparency' in img.info)
+
+            if has_alpha:
+                if img.mode != 'RGBA':
+                    img = img.convert('RGBA')
+                output = io.BytesIO()
+                img.save(output, format='PNG', optimize=True)
+                optimized = output.getvalue()
+                if len(optimized) <= MAX_COMPRESSED_IMAGE_BYTES:
+                    return f'{stem}.png', 'image/png', optimized
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                background.paste(img, mask=img.getchannel('A'))
+                img = background
+
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+
+            quality = IMAGE_JPEG_QUALITY
+            optimized = raw_bytes
+            while quality >= 45:
+                output = io.BytesIO()
+                img.save(output, format='JPEG', quality=quality, optimize=True, progressive=True)
+                optimized = output.getvalue()
+                if len(optimized) <= MAX_COMPRESSED_IMAGE_BYTES or quality == 45:
+                    break
+                quality -= 10
+            return f'{stem}.jpg', 'image/jpeg', optimized
+    except Exception:
+        log.exception("Image compression skipped for %s", filename)
+        return filename, get_image_mime_type(filename), raw_bytes
+
+
+def build_processed_images(files):
+    """Deduplicate and compress uploaded images before upstream upload."""
+    processed = []
+    seen_hashes = set()
+
+    for file in files or []:
+        if len(processed) >= MAX_UPSTREAM_IMAGES:
+            break
+        if not (file and file.filename):
+            continue
+
+        fname = secure_filename(file.filename)
+        if not fname or not allowed_file(fname):
+            continue
+
+        ext = fname.rsplit('.', 1)[1].lower() if '.' in fname else ''
+        if ext not in {'jpg', 'jpeg', 'png', 'gif', 'webp'}:
+            continue
+
+        raw = file.read()
+        if not raw:
+            continue
+
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest in seen_hashes:
+            log.info("Skipped duplicate image: %s", fname)
+            continue
+        seen_hashes.add(digest)
+
+        optimized_name, mime_type, optimized_bytes = compress_image_bytes(fname, raw)
+        processed.append({
+            'filename': optimized_name,
+            'mime_type': mime_type,
+            'content': optimized_bytes,
+            'data_url': f"data:{mime_type};base64,{base64.b64encode(optimized_bytes).decode('utf-8')}"
+        })
+
+    return processed
+
+
 @app.route('/')
 def index():
     """Serve the main HTML page"""
@@ -309,7 +409,8 @@ def create_session():
             'user_id': user_id,
             'source_id': source['id'],
             'source_name': source['name'],
-            'upstream_conversation_id': ''
+            'upstream_conversation_id': '',
+            'latest_image_files': []
         }
 
         return jsonify({
@@ -385,33 +486,38 @@ def chat():
             }), 503
 
         image_data = []
+        image_files = []
         if 'files' in request.files:
-            for file in request.files.getlist('files'):
-                if not (file and file.filename):
-                    continue
-                fname = secure_filename(file.filename)
-                if not fname or not allowed_file(fname):
-                    continue
-                ext = fname.rsplit('.', 1)[1].lower() if '.' in fname else ''
-                if ext in {'jpg', 'jpeg', 'png', 'gif', 'webp'}:
-                    raw = file.read()
-                    img_b64 = base64.b64encode(raw).decode('utf-8')
-                    image_data.append({
-                        'type': 'image',
-                        'url': f'data:{get_image_mime_type(fname)};base64,{img_b64}'
-                    })
+            processed_images = build_processed_images(request.files.getlist('files'))
+            image_files = [
+                {
+                    'filename': item['filename'],
+                    'mime_type': item['mime_type'],
+                    'content': item['content']
+                }
+                for item in processed_images
+            ]
+            image_data = [
+                {
+                    'type': 'image',
+                    'url': item['data_url']
+                }
+                for item in processed_images
+            ]
 
         message_content = user_message
         if image_data:
             message_content = [{'type': 'text', 'text': user_message}] + image_data
 
+        active_image_files = image_files or session.get('latest_image_files', [])
         upstream_conversation_id = session.get('upstream_conversation_id', '')
         response_data, upstream_error = call_source_api(
             source=source,
             message=user_message,
             conversation_id=upstream_conversation_id,
             user_id=user_id,
-            image_data=image_data
+            image_data=image_data,
+            image_files=active_image_files
         )
 
         if response_data is None:
@@ -424,6 +530,8 @@ def chat():
         maybe_upstream_cid = dify_extract_conversation_id(response_data)
         if maybe_upstream_cid:
             session['upstream_conversation_id'] = maybe_upstream_cid
+        if image_files:
+            session['latest_image_files'] = image_files
 
         session['messages'].append({
             'role': 'user',
@@ -451,8 +559,10 @@ def chat():
         return jsonify({'error': 'Internal server error'}), 500
 
 
-def _source_headers(source):
-    headers = {'Content-Type': 'application/json'}
+def _source_headers(source, *, include_content_type=True):
+    headers = {}
+    if include_content_type:
+        headers['Content-Type'] = 'application/json'
     api_key = source.get('api_key', '')
     if api_key:
         headers['Authorization'] = f'Bearer {api_key}'
@@ -460,7 +570,8 @@ def _source_headers(source):
     if isinstance(extra_headers, dict):
         for k, v in extra_headers.items():
             if isinstance(k, str) and isinstance(v, str):
-                headers[k] = v
+                if not include_content_type or k.lower() != 'content-type':
+                    headers[k] = v
     return headers
 
 
@@ -479,7 +590,35 @@ def _request_json(api_endpoint, payload, headers):
     return None, f'HTTP {response.status_code}' + (f': {snippet}' if snippet else '')
 
 
-def call_dify_chat_api(source, message, conversation_id, user_id, image_data=None):
+def upload_dify_file(source, user_id, file_item):
+    api_endpoint = f"{source['api_url']}/files/upload"
+    headers = _source_headers(source, include_content_type=False)
+    files = {
+        'file': (
+            file_item['filename'],
+            file_item['content'],
+            file_item['mime_type']
+        )
+    }
+    data = {'user': user_id}
+    response = requests.post(api_endpoint, data=data, files=files, headers=headers, timeout=60)
+    log.debug("Upload response %s (%d bytes)", response.status_code, len(response.text))
+    if 200 <= response.status_code < 300:
+        try:
+            body = response.json()
+        except ValueError:
+            return None, 'Upload API returned invalid JSON'
+        if not isinstance(body, dict):
+            return None, f'Upload API returned non-object JSON ({type(body).__name__})'
+        upload_file_id = str(body.get('id') or '').strip()
+        if not upload_file_id:
+            return None, 'Upload API response missing file id'
+        return upload_file_id, None
+    snippet = (response.text or '')[:200].replace('\n', ' ')
+    return None, f'Upload failed: HTTP {response.status_code}' + (f': {snippet}' if snippet else '')
+
+
+def call_dify_chat_api(source, message, conversation_id, user_id, image_files=None):
     api_endpoint = f"{source['api_url']}{source.get('chat_endpoint', '/chat-messages')}"
     headers = _source_headers(source)
     payload = {
@@ -487,13 +626,19 @@ def call_dify_chat_api(source, message, conversation_id, user_id, image_data=Non
         'query': message,
         'response_mode': 'blocking',
         'conversation_id': dify_payload_conversation_id(conversation_id),
-        'user': user_id,
-        'files': []
+        'user': user_id
     }
-    if image_data:
-        for img in image_data:
-            if img.get('type') == 'image':
-                payload['files'].append({'type': 'image', 'url': img.get('url')})
+    if image_files:
+        payload['files'] = []
+        for img in image_files:
+            upload_file_id, upload_error = upload_dify_file(source, user_id, img)
+            if not upload_file_id:
+                return None, upload_error
+            payload['files'].append({
+                'type': 'image',
+                'transfer_method': 'local_file',
+                'upload_file_id': upload_file_id
+            })
     log.info("Calling source[%s] chat: %s", source['id'], api_endpoint)
     return _request_json(api_endpoint, payload, headers)
 
@@ -531,7 +676,7 @@ def call_custom_api(source, message, conversation_id, user_id, image_data=None):
     return _request_json(api_endpoint, payload, headers)
 
 
-def call_source_api(source, message, conversation_id, user_id, image_data=None):
+def call_source_api(source, message, conversation_id, user_id, image_data=None, image_files=None):
     """
     Generic source dispatcher.
     Supported types:
@@ -547,7 +692,7 @@ def call_source_api(source, message, conversation_id, user_id, image_data=None):
     source_type = source.get('type')
     try:
         if source_type == 'dify_chat':
-            return call_dify_chat_api(source, message, conversation_id, user_id, image_data=image_data)
+            return call_dify_chat_api(source, message, conversation_id, user_id, image_files=image_files)
         if source_type == 'dify_workflow':
             return call_dify_workflow_api(source, message, user_id)
         if source_type == 'custom_api':
@@ -695,5 +840,3 @@ if __name__ == '__main__':
         log.warning("Running Flask dev server in production — use gunicorn instead")
 
     app.run(host=host, port=port, debug=debug)
-
-

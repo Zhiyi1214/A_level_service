@@ -5,10 +5,6 @@
 }
 
 :root {
-    --radius-sm: 10px;
-    --radius-md: 16px;
-    --radius-lg: 22px;
-    --radius-xl: 28px;
     --shadow-panel: 0 20px 60px rgba(0, 0, 0, 0.35);
     --shadow-soft: 0 10px 30px rgba(0, 0, 0, 0.18);
 }
@@ -232,6 +228,12 @@ body {
     padding-right: 2px;
 }
 
+.conversations-container,
+.messages-area {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+
 .conversations-container::-webkit-scrollbar,
 .messages-area::-webkit-scrollbar {
     width: 6px;
@@ -259,13 +261,14 @@ body {
     background: transparent;
     color: var(--text-secondary);
     font-size: 13px;
+    cursor: pointer;
     transition: all 0.2s ease;
 }
 
-.conversation-trigger {
-    flex: 1;
+.conversation-item-label {
+    display: block;
     min-width: 0;
-    cursor: pointer;
+    flex: 1;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -297,6 +300,7 @@ body {
     opacity: 0;
     cursor: pointer;
     transition: all 0.2s ease;
+    z-index: 2;
 }
 
 .conversation-item:hover .delete-btn {
@@ -575,6 +579,22 @@ body {
     border-radius: 14px;
 }
 
+.message-image-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.message-image--thumb {
+    width: 120px;
+    height: 120px;
+    max-width: none;
+    max-height: none;
+    margin-top: 0;
+    object-fit: cover;
+}
+
 .input-area {
     width: min(100%, 940px);
     margin: 0 auto;
@@ -585,42 +605,65 @@ body {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
+    width: 100%;
+    flex-basis: 100%;
     min-height: 0;
-    margin-bottom: 10px;
-    padding: 0 6px;
+    margin-bottom: 0;
+    padding: 2px 2px 0;
 }
 
 .uploaded-files:empty {
-    margin-bottom: 0;
+    display: none;
 }
 
 .file-tag {
+    position: relative;
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
+    justify-content: center;
+    width: 76px;
+    height: 76px;
+    padding: 0;
     border: 1px solid var(--border-color);
-    border-radius: 999px;
+    border-radius: 18px;
     background: var(--bg-soft);
-    color: var(--text-secondary);
-    font-size: 12px;
+}
+
+.file-tag-preview {
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+    object-fit: cover;
+    display: block;
+    background: rgba(255, 255, 255, 0.04);
 }
 
 .file-tag .remove-btn {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    z-index: 1;
+    width: 24px;
+    height: 24px;
     border: none;
-    background: transparent;
-    color: var(--text-tertiary);
+    border-radius: 999px;
+    background: var(--bg-elevated-strong);
+    color: var(--text-secondary);
+    box-shadow: var(--shadow-soft);
     cursor: pointer;
 }
 
 .file-tag .remove-btn:hover {
     color: var(--danger-color);
+    background: var(--bg-soft);
 }
 
 .input-box-container {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
+    row-gap: 10px;
     padding: 10px 10px 10px 8px;
     border: 1px solid var(--border-color);
     border-radius: 26px;
@@ -910,10 +953,7 @@ body {
         border: none;
     }
 
-    .mobile-menu-btn {
-        display: inline-flex;
-    }
-
+    .mobile-menu-btn,
     .app-container.sidebar-collapsed .mobile-menu-btn {
         display: inline-flex;
     }
@@ -928,9 +968,7 @@ body {
     }
 
     .input-box-container {
-        flex-wrap: wrap;
         align-items: stretch;
-        row-gap: 10px;
     }
 
     .message-input {
@@ -996,10 +1034,21 @@ body {
         padding: 12px 14px;
     }
 
+    .message-image--thumb {
+        width: 88px;
+        height: 88px;
+    }
+
     .attach-btn,
     .send-btn,
     .source-select-inline {
         height: 40px;
+    }
+
+    .file-tag {
+        width: 60px;
+        height: 60px;
+        border-radius: 16px;
     }
 
     .input-footer {

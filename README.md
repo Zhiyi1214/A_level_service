@@ -261,8 +261,10 @@ docker compose up -d
 使用 Gunicorn：
 ```bash
 pip install gunicorn
-gunicorn -w 4 -b 0.0.0.0:5000 app:app
+gunicorn -w 1 -b 0.0.0.0:5000 app:app
 ```
+
+当前会话状态默认保存在进程内存中；若未接入 Redis/数据库等共享存储，请保持单 worker，避免 `/api/sessions` 与 `/api/chat` 落到不同进程后出现 `invalid conversation_id`。
 
 使用 Nginx 反向代理：
 ```nginx

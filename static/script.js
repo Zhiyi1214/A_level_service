@@ -2,14 +2,103 @@
 let currentConversationId = null;
 let uploadedFiles = [];
 const userId = 'user_' + Math.random().toString(36).slice(2, 11);
-let pendingChatRequests = 0;
 let lastEnterDownMs = 0;
-let chatAbortController = null;
 let sendBtnDefaultHtml = '';
 let availableSources = [];
 let selectedSourceId = '';
 const THEME_STORAGE_KEY = 'a_level_theme';
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'a_level_sidebar_collapsed';
+const MAX_UPLOAD_IMAGES = 3;
+const conversationStates = new Map();
+
+function getConversationState(conversationId) {
+    if (!conversationId) {
+        return null;
+    }
+    if (!conversationStates.has(conversationId)) {
+        conversationStates.set(conversationId, {
+            serverConversation: null,
+            localMessages: [],
+            pendingCount: 0,
+            abortController: null
+        });
+    }
+    return conversationStates.get(conversationId);
+}
+
+function getCurrentConversationState() {
+    return currentConversationId ? getConversationState(currentConversationId) : null;
+}
+
+function setCurrentConversation(conversationId) {
+    currentConversationId = conversationId || null;
+    updateActiveConversation();
+    syncSendBtn();
+}
+
+function getCurrentPendingCount() {
+    const state = getCurrentConversationState();
+    return state ? state.pendingCount : 0;
+}
+
+function setConversationServerData(conversationId, conv) {
+    const state = getConversationState(conversationId);
+    if (!state) return;
+    state.serverConversation = {
+        id: conversationId,
+        created_at: conv && conv.created_at ? conv.created_at : '',
+        messages: Array.isArray(conv && conv.messages) ? conv.messages.slice() : [],
+        source_id: conv && conv.source_id ? conv.source_id : '',
+        source_name: conv && conv.source_name ? conv.source_name : ''
+    };
+}
+
+function addLocalMessages(conversationId, messages) {
+    const state = getConversationState(conversationId);
+    if (!state) return;
+    state.localMessages.push(...messages);
+}
+
+function removeLocalMessagesByRequest(conversationId, requestId) {
+    const state = getConversationState(conversationId);
+    if (!state) return;
+    state.localMessages = state.localMessages.filter(msg => msg.requestId !== requestId);
+}
+
+function replacePendingAssistantMessage(conversationId, requestId, content) {
+    const state = getConversationState(conversationId);
+    if (!state) return;
+    state.localMessages = state.localMessages.map(msg => {
+        if (msg.requestId === requestId && msg.role === 'assistant' && msg.pending) {
+            return { ...msg, content, pending: false };
+        }
+        return msg;
+    });
+}
+
+function getConversationMessagesForView(conversationId) {
+    const state = getConversationState(conversationId);
+    if (!state) return [];
+    const serverMessages = Array.isArray(state.serverConversation && state.serverConversation.messages)
+        ? state.serverConversation.messages
+        : [];
+    return serverMessages.concat(state.localMessages);
+}
+
+function renderConversationView(conversationId) {
+    const messagesArea = document.getElementById('messagesArea');
+    if (!messagesArea) return;
+    const messages = getConversationMessagesForView(conversationId);
+    messagesArea.innerHTML = '';
+    if (!messages.length) {
+        messagesArea.innerHTML = renderWelcomeState();
+        return;
+    }
+    messages.forEach(msg => {
+        addMessageToUI(msg.role, msg.content, { pending: !!msg.pending });
+    });
+    scrollMessagesToBottom();
+}
 
 // Initialize app
 document.addEventListener('DOMContentLoaded', function() {
@@ -79,18 +168,6 @@ function toggleTheme() {
 
 function getPurify() {
     return typeof DOMPurify !== 'undefined' ? DOMPurify : (typeof window !== 'undefined' && window.DOMPurify ? window.DOMPurify : null);
-}
-
-/** 从 /api/chat 返回体中取出可展示的回复文本 */
-function pickAssistantReply(data) {
-    if (!data || typeof data !== 'object') return '';
-    if (typeof data.response === 'string') return data.response;
-    if (data.response != null && typeof data.response !== 'object') return String(data.response);
-    if (typeof data.answer === 'string') return data.answer;
-    if (data.response && typeof data.response === 'object' && typeof data.response.answer === 'string') {
-        return data.response.answer;
-    }
-    return '';
 }
 
 function katexAvailable() {
@@ -274,19 +351,10 @@ function renderAssistantMarkdown(text) {
     }
 }
 
-function setChatBusy(busy) {
-    if (busy) {
-        pendingChatRequests++;
-    } else {
-        pendingChatRequests = Math.max(0, pendingChatRequests - 1);
-    }
-    syncSendBtn();
-}
-
 function syncSendBtn() {
     const btn = document.getElementById('sendBtn');
     if (!btn) return;
-    if (pendingChatRequests > 0) {
+    if (getCurrentPendingCount() > 0) {
         btn.innerHTML = '<span class="send-btn-stop-inner">停止</span>';
         btn.classList.add('send-btn--stop');
         btn.onclick = function (e) {
@@ -307,8 +375,9 @@ function syncSendBtn() {
 }
 
 function stopChatRequest() {
-    if (chatAbortController) {
-        chatAbortController.abort();
+    const state = getCurrentConversationState();
+    if (state && state.abortController) {
+        state.abortController.abort();
     }
 }
 
@@ -322,6 +391,21 @@ function setupEventListeners() {
     messageInput.addEventListener('input', function() {
         this.style.height = 'auto';
         this.style.height = Math.max(44, Math.min(this.scrollHeight, 140)) + 'px';
+    });
+
+    messageInput.addEventListener('paste', function(event) {
+        const items = Array.from((event.clipboardData && event.clipboardData.items) || []);
+        const imageFiles = items
+            .filter(item => item && item.kind === 'file' && item.type && item.type.startsWith('image/'))
+            .map(item => item.getAsFile())
+            .filter(Boolean);
+
+        if (!imageFiles.length) {
+            return;
+        }
+
+        event.preventDefault();
+        queueUploadedFiles(imageFiles, { fromClipboard: true });
     });
 
     document.addEventListener('click', function(event) {
@@ -432,7 +516,14 @@ async function ensureSessionReady() {
         }
         currentConversationId = data.session_id || data.conversation_id;
         selectedSourceId = data.source_id || selectedSourceId;
+        setConversationServerData(currentConversationId, {
+            created_at: new Date().toISOString(),
+            messages: [],
+            source_id: data.source_id || '',
+            source_name: data.source_name || ''
+        });
         setSourceLocked(true);
+        syncSendBtn();
         loadConversations();
         return true;
     } catch (error) {
@@ -444,7 +535,7 @@ async function ensureSessionReady() {
 // Load conversations from backend
 async function loadConversations() {
     try {
-        const response = await fetch(`/api/conversations?user_id=${userId}`);
+        const response = await fetch(`/api/conversations?user_id=${encodeURIComponent(userId)}`);
         if (!response.ok) return;
         const data = await response.json();
         const container = document.getElementById('conversationsList');
@@ -452,6 +543,15 @@ async function loadConversations() {
         if (data.conversations && Object.keys(data.conversations).length > 0) {
             container.innerHTML = '';
             Object.entries(data.conversations).forEach(([id, conv]) => {
+                const state = getConversationState(id);
+                if (state && state.serverConversation) {
+                    state.serverConversation = {
+                        ...state.serverConversation,
+                        created_at: conv.created_at,
+                        source_id: conv.source_id || '',
+                        source_name: conv.source_name || ''
+                    };
+                }
                 container.appendChild(createConversationItem(id, conv));
             });
         } else {
@@ -462,44 +562,42 @@ async function loadConversations() {
     }
 }
 
-// Create conversation item element
+function getConversationPreview(conv) {
+    const lastMessage = conv && conv.last_message;
+    if (!lastMessage) return '新对话';
+    let content = lastMessage.content;
+    if (typeof content === 'object') {
+        content = (Array.isArray(content) && content[0] && content[0].text) || '图片消息';
+    }
+    return content.length > 40 ? content.substring(0, 40) + '...' : content;
+}
+
 function createConversationItem(id, conv) {
     const div = document.createElement('div');
     div.className = 'conversation-item';
     div.dataset.convId = id;
-    if (id === currentConversationId) {
-        div.classList.add('active');
-    }
+    if (id === currentConversationId) div.classList.add('active');
 
-    const lastMessage = conv.last_message;
-    let preview = '新对话';
-    if (lastMessage) {
-        let content = lastMessage.content;
-        if (typeof content === 'object') {
-            content = content[0]?.text || '图片消息';
-        }
-        preview = content.substring(0, 40) + (content.length > 40 ? '...' : '');
-    }
     const sourcePrefix = conv && conv.source_name ? `[${conv.source_name}] ` : '';
 
-    const trigger = document.createElement('span');
-    trigger.className = 'conversation-trigger';
-    trigger.textContent = sourcePrefix + preview;
-    trigger.addEventListener('click', () => switchConversation(id));
+    const label = document.createElement('span');
+    label.className = 'conversation-item-label';
+    label.textContent = sourcePrefix + getConversationPreview(conv);
 
     const delBtn = document.createElement('button');
     delBtn.className = 'delete-btn';
     delBtn.textContent = '×';
     delBtn.addEventListener('click', (e) => deleteConversation(id, e));
 
-    div.appendChild(trigger);
+    div.addEventListener('click', () => switchConversation(id));
+    div.appendChild(label);
     div.appendChild(delBtn);
     return div;
 }
 
 // Start new chat
 function startNewChat() {
-    currentConversationId = null;
+    setCurrentConversation(null);
     selectedSourceId = '';
     uploadedFiles = [];
     resetComposer();
@@ -509,12 +607,17 @@ function startNewChat() {
     const messagesArea = document.getElementById('messagesArea');
     messagesArea.innerHTML = renderWelcomeState();
     closeSidebar();
-    
     loadConversations();
 }
 
 // Switch conversation
 async function switchConversation(conversationId) {
+    setCurrentConversation(conversationId);
+    selectedSourceId = getConversationSourceId(conversationId) || selectedSourceId;
+    renderSourceOptions();
+    setSourceLocked(true);
+    renderConversationView(conversationId);
+    closeSidebar();
     try {
         const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}?user_id=${encodeURIComponent(userId)}`);
         if (!response.ok) {
@@ -527,7 +630,7 @@ async function switchConversation(conversationId) {
             return;
         }
 
-        currentConversationId = conversationId;
+        setConversationServerData(conversationId, data);
         uploadedFiles = [];
         resetComposer();
         if (data.source_id) {
@@ -535,25 +638,19 @@ async function switchConversation(conversationId) {
             renderSourceOptions();
         }
         setSourceLocked(true);
-        displayConversation(data);
-        closeSidebar();
+        renderConversationView(conversationId);
         loadConversations();
     } catch (error) {
         console.error('Error loading conversation:', error);
     }
 }
 
-// Display conversation
-function displayConversation(conv) {
-    const messagesArea = document.getElementById('messagesArea');
-    messagesArea.innerHTML = '';
-    
-    if (conv.messages && conv.messages.length > 0) {
-        conv.messages.forEach(msg => {
-            addMessageToUI(msg.role, msg.content);
-        });
-        scrollMessagesToBottom();
+function getConversationSourceId(conversationId) {
+    const state = getConversationState(conversationId);
+    if (!state || !state.serverConversation) {
+        return '';
     }
+    return state.serverConversation.source_id || '';
 }
 
 // Delete conversation
@@ -584,14 +681,40 @@ async function deleteConversation(conversationId, event) {
 // Handle file selection
 function handleFileSelect(event) {
     const files = event.target.files;
-    
-    for (let file of files) {
+    queueUploadedFiles(files);
+    if (event.target) {
+        event.target.value = '';
+    }
+}
+
+function queueUploadedFiles(files, options = {}) {
+    const fromClipboard = !!options.fromClipboard;
+    for (let file of files || []) {
+        if (!file) continue;
+        if (!file.type || !file.type.startsWith('image/')) {
+            if (fromClipboard) {
+                continue;
+            }
+        }
         // Check file size (max 50MB)
         if (file.size > 52428800) {
             alert('File too large. Maximum size is 50MB');
             continue;
         }
-        
+
+        if (uploadedFiles.length >= MAX_UPLOAD_IMAGES) {
+            alert(`最多只能上传 ${MAX_UPLOAD_IMAGES} 张图片。`);
+            break;
+        }
+
+        if (fromClipboard && !file.name) {
+            const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+            file = new File([file], `clipboard-image-${Date.now()}.${ext}`, { type: file.type });
+        }
+
+        if (file.type && file.type.startsWith('image/')) {
+            file._previewUrl = URL.createObjectURL(file);
+        }
         uploadedFiles.push(file);
         addFileTag(file);
     }
@@ -608,22 +731,49 @@ function addFileTag(file) {
     tag.className = 'file-tag';
     tag.dataset.fileId = fileId;
 
-    const label = document.createElement('span');
-    const displayName = file.name.length > 20 ? file.name.substring(0, 17) + '...' : file.name;
-    label.textContent = '🖼️ ' + displayName;
+    if (file._previewUrl) {
+        const preview = document.createElement('img');
+        preview.className = 'file-tag-preview';
+        preview.src = file._previewUrl;
+        preview.alt = file.name || '上传图片预览';
+        tag.appendChild(preview);
+    }
 
     const removeBtn = document.createElement('button');
     removeBtn.className = 'remove-btn';
     removeBtn.textContent = '×';
     removeBtn.addEventListener('click', () => removeFileById(fileId));
 
-    tag.appendChild(label);
     tag.appendChild(removeBtn);
     container.appendChild(tag);
 }
 
+function revokeQueuedFilePreview(file) {
+    if (file && file._previewUrl) {
+        URL.revokeObjectURL(file._previewUrl);
+        delete file._previewUrl;
+    }
+}
+
+function clearQueuedFiles() {
+    uploadedFiles.forEach(revokeQueuedFilePreview);
+    uploadedFiles = [];
+    const uploadedFilesContainer = document.getElementById('uploadedFiles');
+    if (uploadedFilesContainer) {
+        uploadedFilesContainer.innerHTML = '';
+    }
+}
+
 function removeFileById(fileId) {
-    uploadedFiles = uploadedFiles.filter(f => f._tagId !== fileId);
+    const nextFiles = [];
+    uploadedFiles.forEach(file => {
+        if (file._tagId === fileId) {
+            revokeQueuedFilePreview(file);
+        } else {
+            nextFiles.push(file);
+        }
+    });
+    uploadedFiles = nextFiles;
     const tag = document.querySelector(`.file-tag[data-file-id="${fileId}"]`);
     if (tag) tag.remove();
 }
@@ -643,15 +793,92 @@ function handleInputKeydown(event) {
     lastEnterDownMs = now;
 }
 
-// Send message
+function buildUserMessageContent(message, files) {
+    const text = (message || '').trim();
+    const imageItems = (files || [])
+        .filter(file => file && file.type && file.type.startsWith('image/'))
+        .map(file => ({
+            type: 'image',
+            url: URL.createObjectURL(file)
+        }));
+
+    if (!imageItems.length) {
+        return text;
+    }
+
+    const content = [];
+    if (text) {
+        content.push({ type: 'text', text });
+    }
+    return content.concat(imageItems);
+}
+
+async function postChatMessage({ message, files, controller, conversationId, sourceId }) {
+    const formData = new FormData();
+    formData.append('message', message);
+    formData.append('conversation_id', conversationId || '');
+    formData.append('user_id', userId);
+    formData.append('source_id', sourceId || '');
+
+    (files || []).forEach(file => {
+        formData.append('files', file);
+    });
+
+    return fetch('/api/chat', {
+        method: 'POST',
+        body: formData,
+        signal: controller.signal
+    });
+}
+
+function tryParseJsonResponse(rawText, status) {
+    try {
+        return { ok: true, data: rawText ? JSON.parse(rawText) : {} };
+    } catch (e) {
+        const hint = rawText && rawText.trim().startsWith('<')
+            ? '（上游返回了 HTML，多为反向代理/Nginx 超时或 502）'
+            : '';
+        const snippet = rawText ? rawText.slice(0, 280).replace(/\s+/g, ' ') : '';
+        return {
+            ok: false,
+            errorMessage: '❌ Error: 响应不是合法 JSON (HTTP ' + status + ') ' + hint + (snippet ? '\n' + snippet : '')
+        };
+    }
+}
+
+async function refreshConversationFromServer(conversationId) {
+    if (!conversationId) return;
+    try {
+        const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}?user_id=${encodeURIComponent(userId)}`);
+        if (!response.ok) {
+            return;
+        }
+        const data = await response.json();
+        if (!data.success) {
+            return;
+        }
+        setConversationServerData(conversationId, data);
+        if (currentConversationId === conversationId) {
+            renderConversationView(conversationId);
+            syncSendBtn();
+        }
+    } catch (error) {
+        console.error('Error refreshing conversation:', error);
+    }
+}
+
+function failPendingMessage(convId, requestId, errorText) {
+    replacePendingAssistantMessage(convId, requestId, errorText);
+    if (currentConversationId === convId) renderConversationView(convId);
+}
+
 async function sendMessage() {
     const input = document.getElementById('messageInput');
     const message = input.value.trim();
+    const filesToSend = uploadedFiles.slice();
+    const outboundMessage = message || (filesToSend.length ? '根据图片回答' : '');
 
-    if (!message) {
-        return;
-    }
-    if (pendingChatRequests > 0) {
+    if (!outboundMessage && !filesToSend.length) {
         return;
     }
 
@@ -660,97 +887,128 @@ async function sendMessage() {
         return;
     }
 
-    // Add user message to UI
-    addMessageToUI('user', message);
-    const pendingAssistantMessage = addMessageToUI('assistant', '正在生成回复...', { pending: true });
+    const requestConversationId = currentConversationId;
+    const requestSourceId = selectedSourceId || '';
+    const state = getConversationState(requestConversationId);
+    if (!state || state.pendingCount > 0) {
+        return;
+    }
 
-    // Clear input and files
+    const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const userMessageContent = buildUserMessageContent(message, filesToSend);
+    addLocalMessages(requestConversationId, [
+        { requestId, role: 'user', content: userMessageContent, pending: false },
+        { requestId, role: 'assistant', content: '正在生成回复...', pending: true }
+    ]);
+    if (currentConversationId === requestConversationId) {
+        renderConversationView(requestConversationId);
+    }
+
     input.value = '';
     input.style.height = 'auto';
     input.style.height = '44px';
-    document.getElementById('uploadedFiles').innerHTML = '';
+    clearQueuedFiles();
 
-    setChatBusy(true);
-    chatAbortController = new AbortController();
+    const requestController = new AbortController();
+    state.pendingCount += 1;
+    state.abortController = requestController;
+    syncSendBtn();
 
     try {
-        // Prepare form data for file upload
-        const formData = new FormData();
-        formData.append('message', message);
-        formData.append('conversation_id', currentConversationId || '');
-        formData.append('user_id', userId);
-        formData.append('source_id', selectedSourceId || '');
-
-        // Add uploaded files
-        uploadedFiles.forEach(file => {
-            formData.append('files', file);
+        let response = await postChatMessage({
+            message: outboundMessage,
+            files: filesToSend,
+            controller: requestController,
+            conversationId: requestConversationId,
+            sourceId: requestSourceId
         });
 
-        uploadedFiles = [];
-
-        // Send to backend
-        const response = await fetch('/api/chat', {
-            method: 'POST',
-            body: formData,
-            signal: chatAbortController.signal
-        });
-
-        const rawText = await response.text();
-        let data = {};
-        try {
-            data = rawText ? JSON.parse(rawText) : {};
-        } catch (e) {
-            const hint = rawText && rawText.trim().startsWith('<')
-                ? '（上游返回了 HTML，多为反向代理/Nginx 超时或 502）'
-                : '';
-            const snippet = rawText ? rawText.slice(0, 280).replace(/\s+/g, ' ') : '';
-            updateMessageInUI(pendingAssistantMessage, 'assistant', '❌ Error: 响应不是合法 JSON (HTTP ' + response.status + ') ' + hint + (snippet ? '\n' + snippet : ''));
+        let rawText = await response.text();
+        let parsed = tryParseJsonResponse(rawText, response.status);
+        if (!parsed.ok) {
+            failPendingMessage(requestConversationId, requestId, parsed.errorMessage);
             return;
+        }
+        let data = parsed.data;
+
+        if (response.status === 404 && data && data.detail === 'Session expired or invalid conversation_id.') {
+            if (currentConversationId !== requestConversationId) {
+                failPendingMessage(requestConversationId, requestId, '❌ 当前会话已失效，请回到该会话后重试。');
+                return;
+            }
+            currentConversationId = null;
+            setSourceLocked(false);
+
+            const renewedSession = await ensureSessionReady();
+            if (renewedSession) {
+                const renewedConversationId = currentConversationId;
+                if (renewedConversationId && renewedConversationId !== requestConversationId) {
+                    removeLocalMessagesByRequest(requestConversationId, requestId);
+                    addLocalMessages(renewedConversationId, [
+                        { requestId, role: 'user', content: userMessageContent, pending: false },
+                        { requestId, role: 'assistant', content: '正在生成回复...', pending: true }
+                    ]);
+                    if (currentConversationId === renewedConversationId) {
+                        renderConversationView(renewedConversationId);
+                    }
+                }
+                response = await postChatMessage({
+                    message: outboundMessage,
+                    files: filesToSend,
+                    controller: requestController,
+                    conversationId: renewedConversationId || requestConversationId,
+                    sourceId: requestSourceId
+                });
+                rawText = await response.text();
+                parsed = tryParseJsonResponse(rawText, response.status);
+                if (!parsed.ok) {
+                    failPendingMessage(requestConversationId, requestId, parsed.errorMessage);
+                    return;
+                }
+                data = parsed.data;
+            }
         }
 
         if (!response.ok) {
             const detail = data.detail || data.error || '';
-            if (response.status === 409 && data.error === 'source_locked') {
-                updateMessageInUI(pendingAssistantMessage, 'assistant', '❌ 当前会话已锁定知识库，不能中途切换。请新建对话后再切换。');
-            } else {
-                updateMessageInUI(pendingAssistantMessage, 'assistant', '❌ Error: HTTP ' + response.status + (detail ? ' — ' + detail : ''));
-            }
+            const errorMsg = (response.status === 409 && data.error === 'source_locked')
+                ? '❌ 当前会话已锁定知识库，不能中途切换。请新建对话后再切换。'
+                : '❌ Error: HTTP ' + response.status + (detail ? ' — ' + detail : '');
+            failPendingMessage(requestConversationId, requestId, errorMsg);
             return;
         }
 
-        const replyText = pickAssistantReply(data);
-
         if (data.success !== false) {
-            const apiConv = data.conversation_id;
-            // 始终以服务端返回的 conversation_id 为准，保证与 Dify 多轮一致
-            if (apiConv) {
-                currentConversationId = apiConv;
-            }
-            if (data.source_id) {
+            removeLocalMessagesByRequest(requestConversationId, requestId);
+            await refreshConversationFromServer(requestConversationId);
+            if (currentConversationId === requestConversationId && data.source_id) {
                 selectedSourceId = data.source_id;
                 renderSourceOptions();
+                setSourceLocked(true);
             }
-            setSourceLocked(true);
-            updateMessageInUI(pendingAssistantMessage, 'assistant', replyText || '(未收到模型正文，请检查 Dify 应用与 API 返回结构)');
-
             loadConversations();
             updateActiveConversation();
-
-            scrollMessagesToBottom();
         } else {
             const detail = data.detail ? ` (${data.detail})` : '';
-            updateMessageInUI(pendingAssistantMessage, 'assistant', '❌ Error: ' + (data.error || 'Failed to get response') + detail);
+            failPendingMessage(requestConversationId, requestId, '❌ Error: ' + (data.error || 'Failed to get response') + detail);
         }
     } catch (error) {
         console.error('Error sending message:', error);
-        if (error && error.name === 'AbortError') {
-            updateMessageInUI(pendingAssistantMessage, 'assistant', '已停止生成。');
-        } else {
-            updateMessageInUI(pendingAssistantMessage, 'assistant', '❌ Connection error: ' + (error && error.message ? error.message : String(error)));
-        }
+        const errorMsg = (error && error.name === 'AbortError')
+            ? '已停止生成。'
+            : '❌ Connection error: ' + (error && error.message ? error.message : String(error));
+        failPendingMessage(requestConversationId, requestId, errorMsg);
     } finally {
-        chatAbortController = null;
-        setChatBusy(false);
+        const activeState = getConversationState(requestConversationId);
+        if (activeState) {
+            activeState.pendingCount = Math.max(0, activeState.pendingCount - 1);
+            if (activeState.abortController === requestController) {
+                activeState.abortController = null;
+            }
+        }
+        if (currentConversationId === requestConversationId) {
+            syncSendBtn();
+        }
     }
 }
 
@@ -763,11 +1021,8 @@ function removeWelcomeSection() {
 }
 
 function resetComposer() {
-    const uploadedFilesContainer = document.getElementById('uploadedFiles');
     const messageInput = document.getElementById('messageInput');
-    if (uploadedFilesContainer) {
-        uploadedFilesContainer.innerHTML = '';
-    }
+    clearQueuedFiles();
     if (messageInput) {
         messageInput.value = '';
         messageInput.style.height = '44px';
@@ -811,16 +1066,26 @@ function renderMessageBubble(bubble, role, content, options = {}) {
         if (typeof content === 'string') {
             bubble.innerHTML = escapeHtml(content);
         } else if (Array.isArray(content)) {
+            const imageItems = content.filter(item => item.type === 'image');
             content.forEach(item => {
                 if (item.type === 'text') {
-                    bubble.innerHTML += escapeHtml(item.text);
-                } else if (item.type === 'image') {
-                    const img = document.createElement('img');
-                    img.className = 'message-image';
-                    img.src = item.url;
-                    bubble.appendChild(img);
+                    const textBlock = document.createElement('div');
+                    textBlock.className = 'md-block';
+                    textBlock.innerHTML = escapeHtml(item.text);
+                    bubble.appendChild(textBlock);
                 }
             });
+            if (imageItems.length) {
+                const imageGrid = document.createElement('div');
+                imageGrid.className = 'message-image-grid';
+                imageItems.forEach(item => {
+                    const img = document.createElement('img');
+                    img.className = 'message-image message-image--thumb';
+                    img.src = item.url;
+                    imageGrid.appendChild(img);
+                });
+                bubble.appendChild(imageGrid);
+            }
         }
     } else {
         let assistantText = content;
@@ -845,27 +1110,6 @@ function renderMessageBubble(bubble, role, content, options = {}) {
             });
         }
     }
-}
-
-function updateMessageInUI(message, role, content, options = {}) {
-    if (!message) return null;
-    message.className = `message ${role}`;
-    if (options.pending) {
-        message.classList.add('message-pending');
-    }
-
-    const avatar = message.querySelector('.message-avatar');
-    if (avatar) {
-        avatar.textContent = role === 'user' ? '👤' : '🤖';
-    }
-
-    const bubble = message.querySelector('.message-bubble');
-    if (bubble) {
-        renderMessageBubble(bubble, role, content, options);
-    }
-
-    scrollMessagesToBottom();
-    return message;
 }
 
 // Add message to UI
@@ -940,8 +1184,7 @@ function syncSidebarButtons() {
     }
 
     if (collapseBtn) {
-        const collapsed = desktopCollapsed;
-        collapseBtn.title = collapsed ? '展开侧边栏' : '收起侧边栏';
+        collapseBtn.title = desktopCollapsed ? '展开侧边栏' : '收起侧边栏';
         collapseBtn.setAttribute('aria-label', collapseBtn.title);
     }
 }
@@ -999,5 +1242,3 @@ function toggleSidebar() {
     }
     setDesktopSidebarCollapsed(!isDesktopSidebarCollapsed());
 }
-
-
