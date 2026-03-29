@@ -1,368 +1,174 @@
-# AI Assistant - Powered by Dify
+# A-Level Chemistry AI Assistant
 
-一个产品级的AI助手应用，集成Dify API，提供现代化的对话界面。
+基于 Dify 的 A-Level 化学 AI 助手，支持 AQA / CIE / Edexcel 多考试局知识库切换、图片上传与多轮对话。
 
-## 功能特性
+## 功能
 
-✨ **智能对话** - 与AI进行自然流畅的多轮对话
-📸 **图片支持** - 上传并分析图片内容
-💬 **对话管理** - 保存和管理多个对话历史
-🧠 **多知识库切换** - 新会话前可选知识库，会话开始后自动锁定
-🎨 **现代UI** - 响应式设计，美观易用的界面
-🔐 **安全可靠** - 完整的身份验证和数据处理
-
-## 系统架构
-
-```
-┌─────────────────────────────────────────┐
-│         前端 (HTML/CSS/JavaScript)       │
-│    - 现代化的聊天界面                    │
-│    - 图片上传和预览                      │
-│    - 实时消息展示                        │
-└────────────┬────────────────────────────┘
-             │ HTTP/WebSocket
-┌────────────▼────────────────────────────┐
-│      后端网关 (Flask Python)            │
-│    - 请求转发和聚合                      │
-│    - 文件处理和验证                      │
-│    - 对话状态管理                        │
-│    - CORS和认证                          │
-└────────────┬────────────────────────────┘
-             │ HTTP + Bearer Token
-┌────────────▼────────────────────────────┐
-│        Dify API (http://localhost/v1)   │
-│    - AI模型处理                          │
-│    - 复杂推理能力                        │
-│    - 多模态支持                          │
-└─────────────────────────────────────────┘
-```
-
-## 快速开始
-
-### 前置要求
-
-- Python 3.8+
-- Pip 或 Poetry
-- 运行中的Dify服务 (http://localhost/v1)
-- Dify API Key
-
-### 安装步骤
-
-1. **克隆或进入项目目录**
-```bash
-cd /yourpath/A_level
-```
-
-2. **创建虚拟环境（推荐）**
-```bash
-python3 -m venv venv
-source venv/bin/activate  # macOS/Linux
-# 或
-venv\Scripts\activate  # Windows
-```
-
-3. **安装依赖**
-```bash
-pip install -r requirements.txt
-```
-
-4. **配置环境变量**
-```bash
-cp .env.example .env
-```
-
-编辑 `.env` 文件，填入你的配置：
-```bash
-DIFY_API_URL=http://localhost/v1
-SOURCES_CONFIG_PATH=./config/sources.json
-API_KAY_A=your_API_KEY_FOR_WORKFLOW_B
-API_KEY_B=your_API_KEY_FOR_WORKFLOW_A
-FLASK_ENV=development
-HOST=0.0.0.0
-PORT=5000
-```
-
-`config/sources.json` 控制前端可选知识库数量和内容。新增/删除 source 后，需要在env中更新每一个工作流的api kay，api key的数量取决于source数量，演示代码是两个source的情况，配置完成后前端会自动展示对应选项。
-
-5. **启动应用**
-```bash
-python app.py
-```
-
-应用将在 `http://localhost:5000` 运行
-
-## API 端点
-
-### 主要端点
-
-| 方法 | 端点 | 描述 |
-|------|------|------|
-| POST | `/api/chat` | 发送消息，支持文件上传 |
-| GET | `/api/conversations` | 获取对话列表 |
-| GET | `/api/conversations/<id>` | 获取单个对话详情 |
-| DELETE | `/api/conversations/<id>` | 删除对话 |
-| GET | `/api/health` | 健康检查 |
-
-### 发送消息
-
-**请求示例：**
-```bash
-curl -X POST http://localhost:5000/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "你好，请告诉我今天的天气",
-    "conversation_id": "conv_123",
-    "user_id": "user_123"
-  }'
-```
-
-**带图片的请求：**
-```bash
-curl -X POST http://localhost:5000/api/chat \
-  -F "message=这个图片里有什么?" \
-  -F "files=@/path/to/image.jpg" \
-  -F "conversation_id=conv_123" \
-  -F "user_id=user_123"
-```
-
-**响应示例：**
-```json
-{
-  "success": true,
-  "conversation_id": "conv_123",
-  "response": "你好！我是一个AI助手...",
-  "message_id": "msg_456",
-  "usage": {
-    "prompt_tokens": 10,
-    "completion_tokens": 20
-  }
-}
-```
+- **多知识库** — 新对话前选择考试局，会话开始后自动锁定
+- **图片理解** — 上传化学结构、题目截图等，AI 同步解读
+- **对话持久化** — SQLite 存储，重启不丢失
+- **Markdown + LaTeX** — 助手回复支持公式渲染（KaTeX）
+- **深色 / 浅色主题** — 一键切换
+- **响应式布局** — 桌面 / 平板 / 手机自适应
 
 ## 项目结构
 
 ```
 A_level/
-├── app.py                 # 主应用文件
-├── requirements.txt       # Python 依赖
-├── .env.example           # 环境变量示例
-├── README.md              # 本文件（项目主说明）
-├── docs/                  # 文档目录
-│   ├── README.md          # 文档索引
-│   ├── QUICKSTART.md      # 快速入门
-│   ├── API.md             # REST API 说明
-│   └── DOCKER.md          # Docker 部署说明
-├── scripts/               # Shell 脚本（见 scripts/README.md）
-├── templates/
-│   └── index.html         # 前端 HTML
+├── app.py                  # Flask 入口：初始化、蓝图注册、错误处理
+├── extensions.py           # Limiter / CORS / ProxyFix
+├── config/
+│   ├── settings.py         # 集中管理所有环境变量
+│   └── sources.json        # 知识库定义（id / api_url / auth_ref）
+├── routes/
+│   ├── chat.py             # POST /api/sessions, /api/chat
+│   ├── conversations.py    # GET/DELETE /api/conversations
+│   └── sources.py          # GET /api/sources
+├── services/
+│   ├── chat_service.py     # Dify API 调用 + 响应解析
+│   ├── image_service.py    # 图片压缩、去重、上传
+│   └── source_service.py   # 知识库注册表 + 热重载
+├── storage/
+│   ├── base.py             # ConversationStore Protocol
+│   └── sqlite.py           # SQLite 实现（WAL 模式、线程安全）
+├── data/                   # SQLite 数据库（自动创建，已 gitignore）
 ├── static/
-│   ├── style.css          # 前端样式
-│   └── script.js          # 前端脚本
-├── docker-compose.yml     # 容器编排（可选）
+│   ├── script.js
+│   ├── style.css
+│   └── vendor/             # KaTeX / marked / DOMPurify
+├── templates/
+│   └── index.html
+├── scripts/                # Shell 工具脚本
 ├── Dockerfile
-├── nginx.conf             # 可选 Nginx 配置
-└── uploads/               # 上传目录（自动创建，已 gitignore）
+├── docker-compose.yml
+├── nginx.conf
+└── requirements.txt
 ```
 
-更多说明见 [docs/QUICKSTART.md](docs/QUICKSTART.md)、[docs/API.md](docs/API.md)、[docs/DOCKER.md](docs/DOCKER.md)（[文档索引](docs/README.md)）。
+## 快速开始
 
-## 功能详解
-
-### 1. 消息处理
-- 支持纯文本消息
-- 支持带有多张图片的消息
-- 自动处理文件上传和存储
-- 消息格式化和展示
-
-### 2. 对话管理
-- 自动保存对话历史
-- 支持多个并发对话
-- 对话搜索和查看
-- 对话删除和清理
-
-### 3. 安全性
-- Bearer Token认证
-- CORS跨域支持
-- 文件类型和大小限制
-- HTML转义防止XSS
-
-### 4. 用户体验
-- 响应式设计（桌面/平板/手机）
-- 实时消息更新
-- 加载状态指示
-- 错误提示和处理
-
-## 配置说明
-
-### Dify API 配置
-
-**获取API Key：**
-1. 登录你的Dify后台
-2. 进入应用设置
-3. 找到API Keys部分
-4. 复制你的API Key
-
-**API端点配置：**
-- 默认：`http://localhost/v1`
-- 可根据实际Dify服务地址修改
-
-### 文件上传配置
-
-```python
-MAX_CONTENT_LENGTH = 52428800  # 50MB
-ALLOWED_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'pdf', 'txt', 'doc', 'docx']
-```
-
-## 前端功能说明
-
-### 界面组成
-
-1. **左侧边栏**
-   - 新建聊天按钮
-   - 最近对话列表
-   - 对话删除选项
-
-2. **顶部标题栏**
-   - 对话标题
-   - 对话信息
-   - 菜单按钮
-
-3. **消息区域**
-   - 欢迎屏幕（新对话）
-   - 消息展示
-   - 自动滚动到最新消息
-
-4. **输入区域**
-   - 文本输入框
-   - 文件上传按钮
-   - 已上传文件列表
-   - 发送按钮
-
-### 快捷键
-
-- **Enter** - 发送消息
-- **Shift + Enter** - 换行
-- 点击快速开始按钮 - 快速提问
-
-## 部署指南
-
-### Docker 部署
-
-项目已包含 `Dockerfile` 与 `docker-compose.yml`。详见 [docs/DOCKER.md](docs/DOCKER.md)。
+### 1. 安装依赖
 
 ```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2. 配置环境
+
+```bash
+cp .env.example .env
+```
+
+编辑 `.env`，填入你的 Dify API Key：
+
+```bash
+DIFY_API_URL=http://localhost/v1
+
+# 每个知识库对应一个 key，变量名须与 sources.json 中 auth_ref 一致
+DIFY_API_KEY_AQA=app-xxxxxxxxxxxx
+DIFY_API_KEY_CIE=app-xxxxxxxxxxxx
+DIFY_API_KEY_EDX=app-xxxxxxxxxxxx
+```
+
+知识库列表由 `config/sources.json` 控制。增删 source 后在 `.env` 中添加对应的 API key 即可，前端自动展示。
+
+### 3. 启动
+
+```bash
+python3 app.py
+```
+
+打开 http://localhost:5000
+
+## Docker 部署
+
+```bash
+cp .env.example .env
+# 编辑 .env，将 DIFY_API_URL 改为 http://host.docker.internal/v1
+
 docker compose up -d
 ```
 
-默认后端端口为 **8000**（容器内 `PORT=8000`）；经 Compose 中的 Nginx 访问一般为 **8080**。
+| 入口 | 地址 |
+|------|------|
+| Nginx 代理 | http://localhost:8080 |
+| 直连后端 | http://localhost:8000 |
+| 健康检查 | http://localhost:8000/api/health |
 
-### 生产环境配置
+`data/` 目录通过 volume 挂载，数据库文件在容器重建后保留。
 
-使用 Gunicorn：
+## API
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| GET | `/api/sources` | 获取可用知识库列表 |
+| POST | `/api/sessions` | 创建会话（锁定知识库） |
+| POST | `/api/chat` | 发送消息（支持 multipart 图片上传） |
+| GET | `/api/conversations` | 获取对话列表 |
+| GET | `/api/conversations/<id>` | 获取对话详情 |
+| DELETE | `/api/conversations/<id>` | 删除对话 |
+| GET | `/api/health` | 健康检查 |
+
+### 示例
+
 ```bash
-pip install gunicorn
-gunicorn -w 1 -b 0.0.0.0:5000 app:app
+# 创建会话
+curl -X POST http://localhost:5000/api/sessions \
+  -H "Content-Type: application/json" \
+  -d '{"source_id": "AQA", "user_id": "user_1"}'
+
+# 发送消息
+curl -X POST http://localhost:5000/api/chat \
+  -F "message=What is electronegativity?" \
+  -F "conversation_id=<session_id>" \
+  -F "user_id=user_1"
+
+# 带图片
+curl -X POST http://localhost:5000/api/chat \
+  -F "message=Explain this reaction mechanism" \
+  -F "files=@mechanism.jpg" \
+  -F "conversation_id=<session_id>"
 ```
 
-当前会话状态默认保存在进程内存中；若未接入 Redis/数据库等共享存储，请保持单 worker，避免 `/api/sessions` 与 `/api/chat` 落到不同进程后出现 `invalid conversation_id`。
+## 配置参考
 
-使用 Nginx 反向代理：
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
+所有配置通过环境变量管理，集中定义在 `config/settings.py`：
 
-    location / {
-        proxy_pass http://localhost:5000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DIFY_API_URL` | `http://localhost/v1` | Dify API 地址 |
+| `SOURCES_CONFIG_PATH` | `./config/sources.json` | 知识库配置路径 |
+| `FLASK_ENV` | `production` | `development` 开启调试 |
+| `PORT` | `5000` | 监听端口 |
+| `MAX_CONTENT_LENGTH` | `52428800` | 上传大小限制（50 MB） |
+| `MAX_MESSAGE_LENGTH` | `10000` | 单条消息字符上限 |
+| `MAX_CONVERSATIONS_PER_USER` | `50` | 每用户最大会话数（超出自动淘汰最早的） |
+| `LOG_LEVEL` | `INFO` | 日志级别 |
+
+## 架构说明
+
+```
+Browser ──► Flask (routes/) ──► services/ ──► Dify API
+                                   │
+                                   ▼
+                              storage/sqlite
+                                   │
+                                   ▼
+                              data/*.db
 ```
 
-## 故障排除
+- **routes/** 只做 HTTP 协议转换（参数校验、状态码）
+- **services/** 包含全部业务逻辑（Dify 调用、图片压缩、知识库管理）
+- **storage/** 数据持久化，通过 Protocol 定义接口，当前为 SQLite 实现，可替换为 PostgreSQL / Redis
 
-### 问题1：无法连接到Dify API
-```
-解决方案：
-1. 检查DIFY_API_URL配置
-2. 确保Dify服务正在运行
-3. 验证API Key是否正确
-4. 检查网络连接
-```
-
-### 问题2：文件上传失败
-```
-解决方案：
-1. 检查文件大小（最大50MB）
-2. 验证文件格式是否支持
-3. 确保uploads目录存在且可写
-4. 检查磁盘空间
-```
-
-### 问题3：消息发送慢
-```
-解决方案：
-1. 检查网络连接
-2. 增加API超时时间
-3. 检查Dify API性能
-4. 考虑使用流式响应
-```
-
-## 高级配置
-
-### 自定义样式
-
-编辑 `static/style.css` 中的CSS变量：
-```css
-:root {
-    --primary-color: #10a37f;
-    --secondary-color: #0d47a1;
-    --accent-color: #ff6b6b;
-    /* ... 更多配置 */
-}
-```
-
-### 添加新功能
-
-1. **后端**：在 `app.py` 中添加新的路由和逻辑
-2. **前端**：在 `static/script.js` 中添加新的JavaScript函数
-3. **样式**：在 `static/style.css` 中添加新的样式
-
-## 常见问题
-
-**Q: 如何更改默认端口？**
-A: 在 `.env` 文件中修改 `PORT` 值
-
-**Q: 如何支持更多文件类型？**
-A: 修改 `.env` 中的 `ALLOWED_EXTENSIONS`
-
-**Q: 如何实现用户认证？**
-A: 在 `app.py` 中添加认证中间件
-
-**Q: 对话历史是否持久化？**
-A: 当前使用内存存储，可集成数据库（如SQLite、PostgreSQL）
-
-## 安全建议
-
-1. ✅ 定期更新依赖包
-2. ✅ 不要在代码中硬编码API Key
-3. ✅ 使用HTTPS进行生产环境部署
-4. ✅ 实现速率限制防止滥用
-5. ✅ 定期备份对话数据
-6. ✅ 监控API使用情况
+`sources.json` 支持运行时热重载：宿主机修改文件后，下一个请求自动生效，无需重启。
 
 ## 许可证
 
-本项目采用 MIT 许可证
-
-## 支持和联系
-
-如有问题或建议，请提交Issue或联系开发者。
+MIT
 
 ---
 
-**创建时间**: 2026年3月20日
-**版本**: 1.0.0
 **维护者**: Zhiyi Zhang
-

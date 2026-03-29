@@ -12,10 +12,9 @@ services:
       HOST: 0.0.0.0
       PORT: 8000
     volumes:
-      # 挂载整个项目：容器内 /app 与 compose 文件所在目录一致，避免「只挂 config」却仍绑定到另一份旧目录
       - .:/app
-      # 上传目录单独绑定，便于持久化（覆盖 .:/app 中的 uploads）
       - ./uploads:/app/uploads
+      - ./data:/app/data
     restart: unless-stopped
     networks:
       - ai-network
