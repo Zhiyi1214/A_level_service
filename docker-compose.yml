@@ -1,4 +1,38 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai-assistant-postgres
+    environment:
+      POSTGRES_USER: a_level
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-a_level_dev_change_me}
+      POSTGRES_DB: a_level
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U a_level -d a_level"]
+      interval: 5s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: ai-assistant-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ai-network
+    restart: unless-stopped
+
   ai-assistant:
     build: .
     container_name: ai-assistant
@@ -11,19 +45,27 @@ services:
       FLASK_ENV: ${FLASK_ENV:-production}
       HOST: 0.0.0.0
       PORT: 8000
+      DATABASE_URL: postgresql://a_level:${POSTGRES_PASSWORD:-a_level_dev_change_me}@postgres:5432/a_level
+      REDIS_URL: redis://redis:6379/0
+      RATELIMIT_STORAGE_URI: redis://redis:6379/1
     volumes:
       - .:/app
       - ./uploads:/app/uploads
       - ./data:/app/data
-    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - ai-network
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
     labels:
       - "com.example.description=AI Assistant Backend"
 
@@ -35,12 +77,16 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      - ai-assistant
+      ai-assistant:
+        condition: service_healthy
     networks:
       - ai-network
     restart: unless-stopped
 
+volumes:
+  pgdata:
+  redisdata:
+
 networks:
   ai-network:
     driver: bridge
-

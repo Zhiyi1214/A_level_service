@@ -8,6 +8,23 @@ from config import settings
 
 oauth = OAuth()
 
+
+def init_session(app):
+    """服务端 Session：配置 REDIS_URL 时使用 Redis，便于多 gunicorn worker 共享登录态。"""
+    if not settings.USE_REDIS_SESSION:
+        return
+    import redis
+    from flask_session import Session
+
+    app.config['SESSION_TYPE'] = 'redis'
+    app.config['SESSION_REDIS'] = redis.from_url(
+        settings.REDIS_URL,
+        decode_responses=False,
+    )
+    app.config['SESSION_USE_SIGNER'] = True
+    app.config['SESSION_KEY_PREFIX'] = 'a_level:sess:'
+    Session(app)
+
 limiter = Limiter(
     key_func=get_remote_address,
     default_limits=["200 per day", "50 per hour"],
@@ -16,6 +33,7 @@ limiter = Limiter(
 
 
 def init_extensions(app):
+    init_session(app)
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     _cors_kwargs: dict = {'origins': settings.CORS_ORIGINS}
     # 带 Cookie 的跨域请求不能与 origins=* 同时使用

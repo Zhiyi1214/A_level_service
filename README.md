@@ -103,11 +103,14 @@ python3 app.py
 
 ## Docker 部署
 
+Compose 会启动 **PostgreSQL**、**Redis**、应用与 Nginx：对话与用户数据在 Postgres 卷 `pgdata`，Session 与限流在 Redis（`docker-compose.yml` 已注入 `DATABASE_URL`、`REDIS_URL`、`RATELIMIT_STORAGE_URI`）。
+
 ```bash
 cp .env.example .env
 # 编辑 .env，将 DIFY_API_URL 改为 http://host.docker.internal/v1
+# 可选：设置 POSTGRES_PASSWORD（须与将来自建的 DATABASE_URL 一致）
 
-docker compose up -d
+docker compose up -d --build
 ```
 
 | 入口 | 地址 |
@@ -116,7 +119,7 @@ docker compose up -d
 | 直连后端 | http://localhost:8000 |
 | 健康检查 | http://localhost:8000/api/health |
 
-`data/` 目录通过 volume 挂载，数据库文件在容器重建后保留。
+本地不用 Docker、也不设置 `DATABASE_URL` 时，仍使用 SQLite（`data/conversations.db`）；不设 `REDIS_URL` 时 Session 为签名 Cookie（单 worker 可用）。
 
 ## API
 

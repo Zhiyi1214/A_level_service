@@ -66,7 +66,19 @@ MAX_COMPRESSED_IMAGE_BYTES = int(os.getenv('MAX_COMPRESSED_IMAGE_BYTES', 1_500_0
 # ---------------------------------------------------------------------------
 # Storage
 # ---------------------------------------------------------------------------
+# 设置 DATABASE_URL（postgresql://...）时使用 PostgreSQL；否则使用本地 SQLite。
+DATABASE_URL = (os.getenv('DATABASE_URL') or '').strip()
 DATABASE_PATH = str(BASE_DIR / 'data' / 'conversations.db')
+USE_POSTGRES = bool(
+    DATABASE_URL
+    and DATABASE_URL.lower().startswith('postgresql')
+)
+
+# ---------------------------------------------------------------------------
+# Session & Redis（多 worker / 上云时建议启用）
+# ---------------------------------------------------------------------------
+REDIS_URL = (os.getenv('REDIS_URL') or '').strip()
+USE_REDIS_SESSION = bool(REDIS_URL)
 
 # ---------------------------------------------------------------------------
 # OAuth (Google) — 与 Google Cloud Console 中「已授权的重定向 URI」须完全一致

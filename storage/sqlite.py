@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from storage.serialize import json_dumps_content, json_loads_content
 
 
 class SQLiteStore:
@@ -132,7 +133,7 @@ class SQLiteStore:
             'messages': [
                 {
                     'role': m['role'],
-                    'content': _json_loads(m['content']),
+                    'content': json_loads_content(m['content']),
                     'timestamp': m['timestamp'],
                 }
                 for m in messages
@@ -162,7 +163,7 @@ class SQLiteStore:
             'last_message': (
                 {
                     'role': last_msg['role'],
-                    'content': _json_loads(last_msg['content']),
+                    'content': json_loads_content(last_msg['content']),
                     'timestamp': last_msg['timestamp'],
                 }
                 if last_msg
@@ -198,7 +199,7 @@ class SQLiteStore:
         self._conn().execute(
             "INSERT INTO messages (conversation_id, role, content, timestamp)"
             " VALUES (?, ?, ?, ?)",
-            (session_id, role, _json_dumps(content), timestamp),
+            (session_id, role, json_dumps_content(content), timestamp),
         )
         self._conn().commit()
 
@@ -301,20 +302,3 @@ class SQLiteStore:
         )
         conn.commit()
         return uid
-
-
-# ------------------------------------------------------------------
-# JSON serialisation helpers
-# ------------------------------------------------------------------
-
-def _json_dumps(val: Any) -> str:
-    if isinstance(val, str):
-        return val
-    return json.dumps(val, ensure_ascii=False)
-
-
-def _json_loads(raw: str) -> Any:
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return raw
