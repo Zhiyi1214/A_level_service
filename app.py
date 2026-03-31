@@ -30,7 +30,7 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = settings.SESSION_COOKIE_SECURE
 app.config['MAX_CONTENT_LENGTH'] = settings.MAX_CONTENT_LENGTH
 
-# 信任一层反向代理（Nginx 已将 X-Forwarded-For 设为可信单一 IP：CF-Connecting-IP 或直连 remote_addr）
+# 信任一层反向代理（Nginx 经 real_ip 校验后把 X-Forwarded-For 设为单一可信客户端 IP）
 app.wsgi_app = ProxyFix(
     app.wsgi_app,
     x_for=1,
@@ -60,6 +60,10 @@ app.register_blueprint(chat_bp)
 app.register_blueprint(conversations_bp)
 app.register_blueprint(sources_bp)
 app.register_blueprint(media_bp)
+
+from auth.csrf_guard import init_csrf_header_guard  # noqa: E402
+
+init_csrf_header_guard(app)
 
 # ---------------------------------------------------------------------------
 # Middleware

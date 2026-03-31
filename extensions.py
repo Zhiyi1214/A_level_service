@@ -46,7 +46,10 @@ def init_extensions(app):
     db.init_app(app)
     migrate.init_app(app, db)
     init_session(app)
-    _cors_kwargs: dict = {'origins': settings.CORS_ORIGINS}
+    _cors_kwargs: dict = {
+        'origins': settings.CORS_ORIGINS,
+        'allow_headers': ['Content-Type', 'Authorization', 'X-Requested-With'],
+    }
     # 带 Cookie 的跨域请求不能与 origins=* 同时使用
     if settings.OAUTH_CONFIGURED and not (
         len(settings.CORS_ORIGINS) == 1 and settings.CORS_ORIGINS[0] == '*'

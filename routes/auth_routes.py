@@ -104,7 +104,8 @@ def google_callback():
         session.permanent = True
         session[SESSION_USER_KEY] = uid
         session.modified = True
-        log.info('Google OAuth callback success: user=%s', userinfo.get('email') or sub)
+        # 勿记录明文邮箱，便于合规与日志外泄场景下的隐私保护
+        log.info('Google OAuth callback success: user_id=%s', uid)
         return _auth_status_redirect('ok')
     except Exception:
         log.exception('google_callback failed')

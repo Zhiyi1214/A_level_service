@@ -40,9 +40,10 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_change_me}
+    # 仅绑定本机，避免 0.0.0.0 + Docker iptables 绕过 UFW 导致 MinIO 暴露在公网
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - miniodata:/data
     networks:
@@ -57,8 +58,6 @@ services:
     container_name: ai-assistant
     env_file:
       - .env
-    ports:
-      - "8000:8000"
     environment:
       FLASK_APP: app:app
       FRONTEND_VERSION: ${FRONTEND_VERSION:-47}
@@ -102,6 +101,7 @@ services:
       - "8080:80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx.cloudflare-realip.conf:/etc/nginx/nginx.cloudflare-realip.conf:ro
     depends_on:
       ai-assistant:
         condition: service_healthy

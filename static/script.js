@@ -10,6 +10,18 @@ let availableSources = [];
 let selectedSourceId = '';
 /** 侧栏按时间排序后，最近一次活跃会话的知识库 id（用于新建聊天默认选中） */
 let defaultSourceIdForNewChat = '';
+/** 与后端一致：跨站简单请求难以伪造此头，作 CSRF 缓解 */
+const API_AJAX_HEADERS = Object.freeze({ 'X-Requested-With': 'XMLHttpRequest' });
+
+function withAjaxHeaders(options = {}) {
+    const o = { ...options };
+    const h = options.headers && typeof options.headers === 'object' && !(options.headers instanceof Headers)
+        ? { ...options.headers }
+        : {};
+    o.headers = { ...API_AJAX_HEADERS, ...h };
+    return o;
+}
+
 const THEME_STORAGE_KEY = 'a_level_theme_v46';
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'a_level_sidebar_collapsed_v46';
 const MAX_UPLOAD_IMAGES = 3;
@@ -199,7 +211,7 @@ function renderSidebarStatus(message = '') {
 
 async function logoutAuth() {
     try {
-        await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' });
+        await fetch('/auth/logout', withAjaxHeaders({ method: 'POST', credentials: 'same-origin' }));
     } catch (e) {
         console.warn('logout failed:', e);
     }
@@ -1162,12 +1174,12 @@ async function ensureSessionReady() {
         if (!oauthConfigured) {
             payload.user_id = anonymousUserId;
         }
-        const response = await fetch('/api/sessions', {
+        const response = await fetch('/api/sessions', withAjaxHeaders({
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'same-origin',
             body: JSON.stringify(payload)
-        });
+        }));
         const data = await response.json();
         if (!response.ok || !data.success) {
             addMessageToUI('assistant', '❌ 创建会话失败：' + (data.error || ('HTTP ' + response.status)));
@@ -1506,7 +1518,7 @@ async function deleteConversation(conversationId, event) {
     try {
         const response = await fetch(
             conversationDetailUrl(conversationId),
-            { method: 'DELETE', credentials: 'same-origin' }
+            withAjaxHeaders({ method: 'DELETE', credentials: 'same-origin' })
         );
         
         if (response.ok) {
@@ -1681,12 +1693,12 @@ async function postChatMessage({ message, files, controller, conversationId, sou
         formData.append('files', file);
     });
 
-    return fetch('/api/chat', {
+    return fetch('/api/chat', withAjaxHeaders({
         method: 'POST',
         body: formData,
         credentials: 'same-origin',
         signal: controller.signal
-    });
+    }));
 }
 
 function tryParseJsonResponse(rawText, status) {
