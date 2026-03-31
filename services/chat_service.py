@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, Optional
 
 import httpx
 
@@ -93,6 +93,9 @@ def iter_source_api_stream(
     user_id,
     image_data=None,
     image_files=None,
+    *,
+    dify_file_cache_get: Optional[Callable[[str], Optional[str]]] = None,
+    dify_file_cache_put: Optional[Callable[[str, str], None]] = None,
 ) -> Iterator[dict[str, Any]]:
     """
     Stream upstream tokens / chunks as {'kind': 'delta', 'text': str}.
@@ -116,7 +119,13 @@ def iter_source_api_stream(
         if source_type == 'dify_chat':
             # image_files 须为本轮请求的新附件；勿传入历史会话缓存，以免重复上传污染上下文
             yield from _stream_dify_chat(
-                source, message, conversation_id, user_id, image_files
+                source,
+                message,
+                conversation_id,
+                user_id,
+                image_files,
+                dify_file_cache_get=dify_file_cache_get,
+                dify_file_cache_put=dify_file_cache_put,
             )
         elif source_type == 'dify_workflow':
             yield from _stream_dify_workflow(source, message, user_id)
@@ -339,7 +348,16 @@ def _handle_dify_sse_obj(
         yield meta
 
 
-def _stream_dify_chat(source, message, conversation_id, user_id, image_files=None):
+def _stream_dify_chat(
+    source,
+    message,
+    conversation_id,
+    user_id,
+    image_files=None,
+    *,
+    dify_file_cache_get: Optional[Callable[[str], Optional[str]]] = None,
+    dify_file_cache_put: Optional[Callable[[str, str], None]] = None,
+):
     """Streaming Dify chat. *image_files* must be files attached in this turn only."""
     api_endpoint = f"{source['api_url']}{source.get('chat_endpoint', '/chat-messages')}"
     headers = _source_headers(source)
@@ -354,7 +372,24 @@ def _stream_dify_chat(source, message, conversation_id, user_id, image_files=Non
     if image_files:
         payload['files'] = []
         for img in image_files:
-            upload_file_id, upload_error = _upload_dify_file(source, user_id, img)
+            upload_file_id: str | None = None
+            upload_error: str | None = None
+            sha = (img.get('content_sha256') or '').strip() if isinstance(img, dict) else ''
+            if sha and dify_file_cache_get is not None:
+                try:
+                    cached = dify_file_cache_get(sha)
+                except Exception:
+                    log.exception("dify_file_cache_get failed")
+                    cached = None
+                if isinstance(cached, str) and cached.strip():
+                    upload_file_id = cached.strip()
+            if not upload_file_id:
+                upload_file_id, upload_error = _upload_dify_file(source, user_id, img)
+                if upload_file_id and sha and dify_file_cache_put is not None:
+                    try:
+                        dify_file_cache_put(sha, upload_file_id)
+                    except Exception:
+                        log.exception("dify_file_cache_put failed")
             if not upload_file_id:
                 yield {'kind': 'error', 'message': upload_error or 'upload failed'}
                 return

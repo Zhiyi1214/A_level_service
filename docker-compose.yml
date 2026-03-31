@@ -53,7 +53,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: a-level-assistant:${APP_IMAGE_TAG:-46}
+    image: a-level-assistant:${APP_IMAGE_TAG:-47}
     container_name: ai-assistant
     env_file:
       - .env
@@ -61,7 +61,7 @@ services:
       - "8000:8000"
     environment:
       FLASK_APP: app:app
-      FRONTEND_VERSION: ${FRONTEND_VERSION:-46}
+      FRONTEND_VERSION: ${FRONTEND_VERSION:-47}
       DIFY_API_URL: ${DIFY_API_URL:-http://host.docker.internal/v1}
       FLASK_ENV: ${FLASK_ENV:-production}
       HOST: 0.0.0.0
@@ -106,6 +106,8 @@ services:
     depends_on:
       ai-assistant:
         condition: service_healthy
+      minio:
+        condition: service_started
     networks:
       - ai-network
     restart: unless-stopped

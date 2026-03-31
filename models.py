@@ -18,6 +18,11 @@ class Conversation(db.Model):
     upstream_conversation_id = db.Column(
         db.Text, nullable=False, server_default=text("''")
     )
+    dify_file_cache = db.Column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    )
     created_at = db.Column(db.DateTime(timezone=True), nullable=False)
 
     messages = db.relationship(

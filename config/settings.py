@@ -31,7 +31,7 @@ HOST = os.getenv('HOST', '0.0.0.0')
 PORT = int(os.getenv('PORT', 5000))
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 # 页脚展示用；可被 .env 覆盖。静态资源 ?v= 使用 static_asset_tag()（文件 mtime），避免只改代码却被 .env 旧值或浏览器强缓存拖死。
-FRONTEND_VERSION = os.getenv('FRONTEND_VERSION', '46')
+FRONTEND_VERSION = os.getenv('FRONTEND_VERSION', '47')
 
 
 def static_asset_tag() -> str:
