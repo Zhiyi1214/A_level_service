@@ -162,6 +162,22 @@ def upload_image_bytes(
     return {'url': _presigned_get_url(key), 'object_key': key}
 
 
+def download_object_bytes(object_key: str) -> bytes | None:
+    """按 Object Key 从已配置的桶读取对象体（例如从仅含 key 的 Redis 缓存再水合为上传用字节）。"""
+    key = (object_key or '').strip()
+    if not key or not is_s3_configured():
+        return None
+    client = _get_s3_client()
+    if not client:
+        return None
+    try:
+        resp = client.get_object(Bucket=settings.S3_BUCKET, Key=key)
+        return resp['Body'].read()
+    except ClientError:
+        log.exception("get_object failed key=%s", key)
+        return None
+
+
 def compress(filename: str, raw_bytes: bytes) -> tuple[str, str, bytes]:
     """Resize / compress a single image before upstream upload."""
     suffix = Path(filename).suffix.lower()
@@ -209,8 +225,19 @@ def compress(filename: str, raw_bytes: bytes) -> tuple[str, str, bytes]:
                 quality -= 10
             return f'{stem}.jpg', 'image/jpeg', optimized
     except Exception:
-        log.exception("Image compression skipped for %s", filename)
-        return filename, get_mime_type(filename), raw_bytes
+        log.exception("Image compression failed for %s", filename)
+        raise ValueError("无法处理该图像文件，可能已损坏或尺寸过大") from None
+
+
+def _reject_oversized_for_data_url(opt_bytes: bytes) -> None:
+    limit = settings.MAX_DATA_URL_IMAGE_BYTES
+    if len(opt_bytes) <= limit:
+        return
+    kb = max(1, limit // 1024)
+    raise ValueError(
+        f'图片压缩后仍超过内联上限（约 {kb}KB）。未配置对象存储或上传失败时无法内联保存过大图片；'
+        '请换一张较小的图或配置 S3/MinIO。'
+    )
 
 
 def build_processed_images(
@@ -252,6 +279,7 @@ def build_processed_images(
             'filename': opt_name,
             'mime_type': mime_type,
             'content': opt_bytes,
+            'content_sha256': digest,
         }
         if is_s3_configured():
             try:
@@ -262,11 +290,13 @@ def build_processed_images(
                 item['object_key'] = up['object_key']
             except Exception:
                 log.exception("S3 upload failed; falling back to data URL")
+                _reject_oversized_for_data_url(opt_bytes)
                 item['data_url'] = (
                     f"data:{mime_type};base64,{base64.b64encode(opt_bytes).decode('utf-8')}"
                 )
                 item['url'] = item['data_url']
         else:
+            _reject_oversized_for_data_url(opt_bytes)
             item['data_url'] = (
                 f"data:{mime_type};base64,{base64.b64encode(opt_bytes).decode('utf-8')}"
             )

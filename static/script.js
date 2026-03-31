@@ -210,9 +210,17 @@ function addLocalMessages(conversationId, messages) {
     state.localMessages.push(...messages);
 }
 
-function removeLocalMessagesByRequest(conversationId, requestId) {
+function removeLocalMessagesByRequest(conversationId, requestId, options = {}) {
     const state = getConversationState(conversationId);
     if (!state) return;
+    const revokeUserBlobUrls = options.revokeUserBlobUrls !== false;
+    if (revokeUserBlobUrls) {
+        for (const msg of state.localMessages) {
+            if (msg.requestId === requestId && msg.role === 'user') {
+                revokeBlobUrlsInUserMessageContent(msg.content);
+            }
+        }
+    }
     state.localMessages = state.localMessages.filter(msg => msg.requestId !== requestId);
 }
 
@@ -321,6 +329,21 @@ document.addEventListener('DOMContentLoaded', async function() {
     try {
         if (typeof marked !== 'undefined' && typeof marked.setOptions === 'function') {
             marked.setOptions({ gfm: true, breaks: true, async: false });
+        }
+        if (
+            typeof marked !== 'undefined' &&
+            typeof marked.use === 'function' &&
+            typeof markedKatex === 'function' &&
+            typeof katex !== 'undefined' &&
+            typeof katex.renderToString === 'function'
+        ) {
+            marked.use(
+                markedKatex({
+                    throwOnError: false,
+                    strict: 'ignore',
+                    nonStandard: true
+                })
+            );
         }
     } catch (e) {
         console.warn('marked init skipped:', e);
@@ -478,66 +501,6 @@ function normalizeUserPlainTextForDisplay(raw) {
     return cur;
 }
 
-function katexAvailable() {
-    return typeof katex !== 'undefined' && typeof katex.renderToString === 'function';
-}
-
-/** 将 LaTeX 交给 KaTeX；失败时退回转义文本，避免整段崩掉 */
-function katexRender(tex, displayMode) {
-    if (!katexAvailable()) {
-        const s = document.createElement('span');
-        s.className = 'math-fallback' + (displayMode ? ' math-fallback--display' : '');
-        s.textContent = (displayMode ? '$$' : '$') + tex + (displayMode ? '$$' : '$');
-        return s.outerHTML;
-    }
-    try {
-        return katex.renderToString(tex, {
-            displayMode: !!displayMode,
-            throwOnError: false,
-            strict: 'ignore'
-        });
-    } catch (e) {
-        const d = document.createElement('span');
-        d.className = 'math-error';
-        d.textContent = tex;
-        return d.outerHTML;
-    }
-}
-
-/** marked 不会当 Markdown 解析的公式占位符（PUA + 词连接符，避免 emphasis 粘连） */
-function makeAssistantMathPlaceholder(id) {
-    return '\u2060\uFFF9M' + String(id) + 'M\uFFF9\u2060';
-}
-
-/** 行内 $ 的闭合位置；忽略奇数个前导反斜杠转义的 $ */
-function findClosingDollar(text, from) {
-    for (let j = from; j < text.length; j++) {
-        if (text[j] !== '$') {
-            continue;
-        }
-        let k = j - 1;
-        let bs = 0;
-        while (k >= 0 && text[k] === '\\') {
-            bs++;
-            k--;
-        }
-        if (bs % 2 === 1) {
-            continue;
-        }
-        return j;
-    }
-    return -1;
-}
-
-/** 将「$」后内容判为公式而非价格等字面量：以 \、{ 或字母起头，或未闭合流式到文末 */
-function assistantInlineMathLooksDeliberate(afterDollar) {
-    const t = afterDollar.trimStart();
-    if (!t) {
-        return false;
-    }
-    return t.startsWith('\\') || t.startsWith('{') || /^[A-Za-z]/.test(t);
-}
-
 /**
  * KaTeX MathML / 结构在 DOMPurify 中的白名单（与 renderToString 输出对齐）
  */
@@ -572,6 +535,66 @@ function sanitizeAssistantHtml(purify, html) {
     });
 }
 
+/**
+ * 仅剥 JSON 字符串壳（首尾引号 + JSON.parse），不做 \\n/\\t 替换，以免破坏 LaTeX（如 \\text、\\right）。
+ */
+function decodeAssistantJsonShell(raw) {
+    if (raw == null || typeof raw !== 'string') {
+        return raw;
+    }
+    let s = raw.trim().replace(/^\uFEFF/, '');
+    if (!s) {
+        return raw;
+    }
+    let cur = s;
+    for (let i = 0; i < 4; i++) {
+        if (cur.length < 2 || cur[0] !== '"' || cur[cur.length - 1] !== '"') {
+            break;
+        }
+        try {
+            const parsed = JSON.parse(cur);
+            if (typeof parsed !== 'string') {
+                break;
+            }
+            cur = parsed;
+        } catch (e) {
+            break;
+        }
+    }
+    return cur;
+}
+
+/** 常见「\\n 实为换行」且非 LaTeX 命令前缀（避免误伤 \\neq、\\nabla 等） */
+const ASSISTANT_SAFE_N_PREFIX = /^(abla|eq|i\b|u\b|ot|otin|parallel|subseteq|supseteq|subset|supset|rightarrow|leftarrow|Rightarrow|Leftarrow|Leftrightarrow|warrow|earrow|exists|uplus|atural)/;
+
+/**
+ * Dify 等返回的字面量 \\r\\n、\\n、\\"；不处理 \\t/\\r，避免 \\text、\\right 被破坏。
+ * \\n 在疑似 LaTeX 命令前缀处保留原样。
+ */
+function assistantDecodeLiteralEscapes(s) {
+    if (s == null || typeof s !== 'string' || !/\\[nr"\\]/.test(s)) {
+        return s;
+    }
+    return s
+        .replace(/\\r\\n/g, '\n')
+        .replace(/\\n/g, (m, offset, str) => {
+            const after = str.slice(offset + 2);
+            if (ASSISTANT_SAFE_N_PREFIX.test(after)) {
+                return m;
+            }
+            return '\n';
+        })
+        .replace(/\\"/g, '"');
+}
+
+/**
+ * 修复整段被二次 JSON 编码、或含字面量 \\n 与首尾引号的助手正文（Dify/部分上游会如此返回）。
+ */
+function decodeAssistantEscapedContent(raw) {
+    const s = decodeAssistantJsonShell(raw);
+    return assistantDecodeLiteralEscapes(s);
+}
+
 function countBackticksAt(text, pos) {
     let c = 0;
     const n = text.length;
@@ -585,15 +608,41 @@ function isAssistantLineStart(text, pos) {
     if (pos === 0) {
         return true;
     }
-    const c = text[pos - 1];
-    return c === '\n' || c === '\r';
+    const ch = text[pos - 1];
+    return ch === '\n' || ch === '\r';
+}
+
+/** marked-katex-extension 不识别 \\[ \\] \\( \\) ；在 parse 前提取，避免 \\t、\\[ 被 Markdown 当转义吃掉 */
+function makeBracketMathPlaceholder(id) {
+    return '\u2060\uFFFA' + String(id) + '\uFFFA\u2060';
+}
+
+function katexRenderBracket(tex, displayMode) {
+    if (typeof katex === 'undefined' || typeof katex.renderToString !== 'function') {
+        const s = document.createElement('span');
+        s.className = 'math-fallback' + (displayMode ? ' math-fallback--display' : '');
+        s.textContent = (displayMode ? '\\[' : '\\(') + tex + (displayMode ? '\\]' : '\\)');
+        return s.outerHTML;
+    }
+    try {
+        return katex.renderToString(tex, {
+            displayMode: !!displayMode,
+            throwOnError: false,
+            strict: 'ignore'
+        });
+    } catch (e) {
+        const d = document.createElement('span');
+        d.className = 'math-error';
+        d.textContent = tex;
+        return d.outerHTML;
+    }
 }
 
 /**
- * 在 fenced / 行内代码外扫描公式，替换为占位符；支持未闭合的 $$、\[、\(、$（流式保护）。
+ * 在 fenced / 行内代码外提取 \\[…\\]、\\(…\\)；支持流式未闭合。$ / $$ 仍由 marked-katex-extension 处理。
  * @returns {{ md: string, mathEntries: { tex: string, display: boolean }[] }}
  */
-function assistantPreExtractMath(text) {
+function assistantPreExtractBracketMath(text) {
     const mathEntries = [];
     let out = '';
     let i = 0;
@@ -602,7 +651,7 @@ function assistantPreExtractMath(text) {
 
     function appendMath(tex, display) {
         mathEntries.push({ tex, display });
-        out += makeAssistantMathPlaceholder(mathEntries.length - 1);
+        out += makeBracketMathPlaceholder(mathEntries.length - 1);
     }
 
     while (i < n) {
@@ -683,19 +732,6 @@ function assistantPreExtractMath(text) {
             }
         }
 
-        if (text[i] === '$' && i + 1 < n && text[i + 1] === '$') {
-            const innerStart = i + 2;
-            const close = text.indexOf('$$', innerStart);
-            if (close === -1) {
-                appendMath(text.slice(innerStart), true);
-                i = n;
-            } else {
-                appendMath(text.slice(innerStart, close), true);
-                i = close + 2;
-            }
-            continue;
-        }
-
         if (text[i] === '\\' && i + 1 < n && text[i + 1] === '[') {
             const innerStart = i + 2;
             const close = text.indexOf('\\]', innerStart);
@@ -722,31 +758,6 @@ function assistantPreExtractMath(text) {
             continue;
         }
 
-        if (text[i] === '$') {
-            const after = text.slice(i + 1);
-            const closeIdx = findClosingDollar(text, i + 1);
-            const deliberate = assistantInlineMathLooksDeliberate(after);
-            if (closeIdx === -1) {
-                if (deliberate) {
-                    appendMath(after, false);
-                    i = n;
-                } else {
-                    out += '$';
-                    i++;
-                }
-                continue;
-            }
-            const inner = text.slice(i + 1, closeIdx);
-            if (!deliberate && inner.trim() === '') {
-                out += '$';
-                i++;
-                continue;
-            }
-            appendMath(inner, false);
-            i = closeIdx + 1;
-            continue;
-        }
-
         out += text[i];
         i++;
     }
@@ -754,12 +765,12 @@ function assistantPreExtractMath(text) {
     return { md: out, mathEntries };
 }
 
-function assistantRestoreMathPlaceholders(html, mathEntries) {
-    let result = html;
+function assistantRestoreBracketMathPlaceholders(html, mathEntries) {
+    let result = String(html);
     for (let idx = 0; idx < mathEntries.length; idx++) {
-        const ph = makeAssistantMathPlaceholder(idx);
+        const ph = makeBracketMathPlaceholder(idx);
         const { tex, display } = mathEntries[idx];
-        const piece = katexRender(tex.trim(), display);
+        const piece = katexRenderBracket(tex.trim(), display);
         const parts = result.split(ph);
         if (parts.length > 1) {
             result = parts.join(piece);
@@ -769,46 +780,7 @@ function assistantRestoreMathPlaceholders(html, mathEntries) {
 }
 
 /**
- * 修复整段被二次 JSON 编码、或含字面量 \\n 与首尾引号的助手正文（Dify/部分上游会如此返回）。
- */
-function decodeAssistantEscapedContent(raw) {
-    if (raw == null || typeof raw !== 'string') {
-        return raw;
-    }
-    let s = raw.trim().replace(/^\uFEFF/, '');
-    if (!s) {
-        return raw;
-    }
-    let cur = s;
-    for (let i = 0; i < 4; i++) {
-        if (cur.length < 2 || cur[0] !== '"' || cur[cur.length - 1] !== '"') {
-            break;
-        }
-        try {
-            const parsed = JSON.parse(cur);
-            if (typeof parsed !== 'string') {
-                break;
-            }
-            cur = parsed;
-        } catch (e) {
-            break;
-        }
-    }
-    s = cur;
-    if (/\\[nrt"\\]/.test(s)) {
-        return s
-            .replace(/\\r\\n/g, '\n')
-            .replace(/\\n/g, '\n')
-            .replace(/\\r/g, '\n')
-            .replace(/\\t/g, '\t')
-            .replace(/\\"/g, '"');
-    }
-    return s;
-}
-
-/**
- * 助手消息：公式占位符 → marked.parse → KaTeX 还原 → DOMPurify（含 MathML 白名单）。
- * 流式未闭合的 $$ / \\[ / \\( / 有意图的单 $ 整段保护，避免 _ * 进入 Markdown。
+ * 助手消息：JSON 解壳 → 提取 \\[\\]\\(\\) 公式 → 字面量 \\n 解码 → marked（含 katex 扩展）→ 回填公式 → DOMPurify。
  */
 function renderAssistantMarkdown(text) {
     if (text == null || text === '') return '';
@@ -817,28 +789,29 @@ function renderAssistantMarkdown(text) {
         d.textContent = String(text);
         return d.innerHTML;
     }
-    text = decodeAssistantEscapedContent(text);
+    let raw = decodeAssistantJsonShell(text);
+    const bracket = assistantPreExtractBracketMath(raw);
+    raw = assistantDecodeLiteralEscapes(bracket.md);
     const purify = getPurify();
     if (typeof marked === 'undefined' || typeof marked.parse !== 'function' || !purify) {
         const d = document.createElement('div');
-        d.textContent = text;
+        d.textContent = raw;
         return d.innerHTML;
     }
     try {
-        const { md, mathEntries } = assistantPreExtractMath(text);
-        let html = marked.parse(md, MARKED_PARSE_OPTS);
+        let html = marked.parse(raw, MARKED_PARSE_OPTS);
         if (html && typeof html.then === 'function') {
             console.warn('marked returned Promise; use plain text fallback');
             const d = document.createElement('div');
-            d.textContent = text;
+            d.textContent = raw;
             return d.innerHTML;
         }
-        html = assistantRestoreMathPlaceholders(String(html), mathEntries);
+        html = assistantRestoreBracketMathPlaceholders(String(html), bracket.mathEntries);
         return sanitizeAssistantHtml(purify, html);
     } catch (e) {
         console.error('Markdown render failed:', e);
         const d = document.createElement('div');
-        d.textContent = text;
+        d.textContent = raw;
         return d.innerHTML;
     }
 }
@@ -1331,8 +1304,22 @@ function revokeQueuedFilePreview(file) {
     }
 }
 
-function clearQueuedFiles() {
-    uploadedFiles.forEach(revokeQueuedFilePreview);
+function revokeBlobUrlsInUserMessageContent(content) {
+    if (!content || !Array.isArray(content)) {
+        return;
+    }
+    for (const item of content) {
+        if (item && item.type === 'image' && typeof item.url === 'string' && item.url.startsWith('blob:')) {
+            URL.revokeObjectURL(item.url);
+        }
+    }
+}
+
+function clearQueuedFiles(options = {}) {
+    const revokePreviews = options.revokePreviews !== false;
+    if (revokePreviews) {
+        uploadedFiles.forEach(revokeQueuedFilePreview);
+    }
     uploadedFiles = [];
     const uploadedFilesContainer = document.getElementById('uploadedFiles');
     if (uploadedFilesContainer) {
@@ -1372,10 +1359,10 @@ function handleInputKeydown(event) {
 function buildUserMessageContent(message, files) {
     const text = (message || '').trim();
     const imageItems = (files || [])
-        .filter(file => file && file.type && file.type.startsWith('image/'))
+        .filter(file => file && file.type && file.type.startsWith('image/') && file._previewUrl)
         .map(file => ({
             type: 'image',
-            url: URL.createObjectURL(file)
+            url: file._previewUrl
         }));
 
     if (!imageItems.length) {
@@ -1572,7 +1559,7 @@ async function sendMessage() {
     input.value = '';
     input.style.height = 'auto';
     input.style.height = '44px';
-    clearQueuedFiles();
+    clearQueuedFiles({ revokePreviews: false });
 
     const requestController = new AbortController();
     state.pendingCount += 1;
@@ -1698,7 +1685,9 @@ async function sendMessage() {
                 }
                 const renewedConversationId = currentConversationId;
                 if (renewedConversationId && renewedConversationId !== requestConversationId) {
-                    removeLocalMessagesByRequest(requestConversationId, requestId);
+                    removeLocalMessagesByRequest(requestConversationId, requestId, {
+                        revokeUserBlobUrls: false
+                    });
                     activeConvId = renewedConversationId;
                     addLocalMessages(renewedConversationId, [
                         { requestId, role: 'user', content: userMessageContent, pending: false },
@@ -1899,11 +1888,14 @@ function addMessageToUI(role, content, options = {}) {
     return message;
 }
 
-// Escape HTML to prevent XSS
+// Escape HTML to prevent XSS (safe for text nodes and attribute values; & first avoids double-escaping)
 function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    return String(text ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 function updateActiveConversation() {

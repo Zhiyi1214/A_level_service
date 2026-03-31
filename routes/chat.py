@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 
@@ -30,10 +31,33 @@ def _normalize_inbound_user_plaintext(text: str) -> str:
             return parsed
     except json.JSONDecodeError:
         pass
-    inner = s[1:-1]
-    if '"' not in inner and '\\' not in inner:
-        return inner
     return text
+
+
+# 与 static/script.js 中 ASSISTANT_SAFE_N_PREFIX 一致：字面量 \n 转真换行时勿拆 LaTeX 命令（\neq、\nabla 等）
+_ASSISTANT_SAFE_N_PREFIX = re.compile(
+    r'^(abla|eq|i\b|u\b|ot|otin|parallel|subseteq|supseteq|subset|supset|'
+    r'rightarrow|leftarrow|Rightarrow|Leftarrow|Leftrightarrow|warrow|earrow|exists|uplus|atural)'
+)
+
+
+def _assistant_decode_literal_escapes(s: str) -> str:
+    """
+    将仍含字面量反斜杠转义的正文还原（Dify 偶发双写）；不得使用全局 .replace('\\\\r')/.replace('\\\\t')，
+    否则会误伤 LaTeX 的 \\rightarrow、\\text、\\right（子串 \\\\r 会匹配 \\rightarrow 的前两个字符）。
+    """
+    if not re.search(r'\\[nr"]', s):
+        return s
+    s = s.replace('\\r\\n', '\n')
+
+    def _sub_n(m: re.Match) -> str:
+        after = s[m.end() :]
+        if _ASSISTANT_SAFE_N_PREFIX.match(after):
+            return m.group(0)
+        return '\n'
+
+    s = re.sub(r'\\n', _sub_n, s)
+    return s.replace('\\"', '"')
 
 
 def _normalize_assistant_plaintext(text: str) -> str:
@@ -45,18 +69,10 @@ def _normalize_assistant_plaintext(text: str) -> str:
         try:
             parsed = json.loads(s)
             if isinstance(parsed, str):
-                return parsed
+                return _assistant_decode_literal_escapes(parsed)
         except json.JSONDecodeError:
             pass
-    if '\\n' in s or '\\r' in s or '\\t' in s or '\\"' in s:
-        return (
-            s.replace('\\r\\n', '\n')
-            .replace('\\n', '\n')
-            .replace('\\r', '\n')
-            .replace('\\t', '\t')
-            .replace('\\"', '"')
-        )
-    return text
+    return _assistant_decode_literal_escapes(s)
 
 
 def _accumulate_stream_chunks(parts: list[str], chunk: str) -> None:
@@ -127,19 +143,6 @@ def chat():
         if settings.OAUTH_CONFIGURED and not user_id:
             return oauth_login_required_response()
 
-        # ----- validate -----
-        if not user_message:
-            return jsonify({'error': 'Message cannot be empty'}), 400
-
-        user_message = _normalize_inbound_user_plaintext(user_message)
-        if not user_message:
-            return jsonify({'error': 'Message cannot be empty'}), 400
-
-        if len(user_message) > settings.MAX_MESSAGE_LENGTH:
-            return jsonify({
-                'error': f'Message too long (max {settings.MAX_MESSAGE_LENGTH} chars)',
-            }), 400
-
         if not conversation_id:
             return jsonify({
                 'error': 'conversation_id is required',
@@ -171,17 +174,25 @@ def chat():
                 'detail': f'source_id={locked_source_id} is not enabled',
             }), 503
 
-        # ----- process images -----
+        # ----- process images (before empty-body check: allow image-only turns) -----
         image_data: list[dict] = []
         image_files: list[dict] = []
         if 'files' in request.files:
-            processed = image_service.build_processed_images(
-                request.files.getlist('files'),
-                user_id=user_id,
-                conversation_id=conversation_id,
-            )
+            try:
+                processed = image_service.build_processed_images(
+                    request.files.getlist('files'),
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                )
+            except ValueError as exc:
+                return jsonify({'error': 'image_rejected', 'detail': str(exc)}), 400
             image_files = [
-                {'filename': p['filename'], 'mime_type': p['mime_type'], 'content': p['content']}
+                {
+                    'filename': p['filename'],
+                    'mime_type': p['mime_type'],
+                    'content': p['content'],
+                    'content_sha256': p.get('content_sha256') or '',
+                }
                 for p in processed
             ]
             for p in processed:
@@ -191,12 +202,25 @@ def chat():
                     seg['object_key'] = obj_key
                 image_data.append(seg)
 
+        # ----- validate message / images -----
+        if not user_message and not image_data:
+            return jsonify({'error': 'Message cannot be empty'}), 400
+
+        user_message = _normalize_inbound_user_plaintext(user_message)
+        if not user_message and not image_data:
+            return jsonify({'error': 'Message cannot be empty'}), 400
+
+        if user_message and len(user_message) > settings.MAX_MESSAGE_LENGTH:
+            return jsonify({
+                'error': f'Message too long (max {settings.MAX_MESSAGE_LENGTH} chars)',
+            }), 400
+
         message_content = user_message
         if image_data:
             message_content = [{'type': 'text', 'text': user_message}] + image_data
 
         # ----- stream upstream (SSE) -----
-        active_image_files = image_files or store.get_image_cache(conversation_id)
+        # Dify：每轮请求只带本轮 multipart；同会话同图 sha256 命中 Postgres 缓存则复用 upload_file_id
         upstream_cid = (session.get('upstream_conversation_id') or '').strip()
 
         def _sse_pack(obj: dict) -> str:
@@ -221,6 +245,19 @@ def chat():
             stream_upstream = upstream_cid
             msg_id = None
             usage: dict = {}
+            dify_cache: dict[str, str] = {}
+            dify_get = None
+            dify_put = None
+            if source.get('type') == 'dify_chat':
+                dify_cache = store.get_dify_file_cache(conversation_id)
+
+                def dify_get(h: str):
+                    return dify_cache.get(h)
+
+                def dify_put(h: str, fid: str):
+                    dify_cache[h] = fid
+                    store.put_dify_file_cache_entry(conversation_id, h, fid)
+
             try:
                 for ev in chat_service.iter_source_api_stream(
                     source=source,
@@ -228,7 +265,9 @@ def chat():
                     conversation_id=upstream_cid,
                     user_id=user_id,
                     image_data=image_data,
-                    image_files=active_image_files,
+                    image_files=image_files,
+                    dify_file_cache_get=dify_get,
+                    dify_file_cache_put=dify_put,
                 ):
                     k = ev.get('kind')
                     if k == 'delta':
@@ -251,8 +290,6 @@ def chat():
                 answer_text = _normalize_assistant_plaintext(''.join(acc))
                 if stream_upstream:
                     store.update_upstream_id(conversation_id, stream_upstream)
-                if image_files:
-                    store.set_image_cache(conversation_id, image_files)
 
                 now = datetime.now().isoformat()
                 store.append_message(conversation_id, 'user', message_content, now)
@@ -268,6 +305,8 @@ def chat():
                     'source_id': locked_source_id,
                     'source_name': source.get('name', locked_source_id),
                 })
+            except GeneratorExit:
+                raise
             except Exception:
                 log.exception("chat stream failed")
                 yield _sse_pack({'event': 'error', 'detail': 'Internal server error'})

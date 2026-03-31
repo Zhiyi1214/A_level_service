@@ -19,8 +19,14 @@ if not SOURCES_CONFIG_PATH.is_absolute():
 # ---------------------------------------------------------------------------
 # Flask
 # ---------------------------------------------------------------------------
-SECRET_KEY = os.getenv('SECRET_KEY') or secrets.token_hex(32)
 FLASK_ENV = os.getenv('FLASK_ENV', 'production')
+_secret_key_env = (os.getenv('SECRET_KEY') or '').strip()
+if FLASK_ENV == 'production' and not _secret_key_env:
+    raise RuntimeError(
+        '生产环境必须设置环境变量 SECRET_KEY；不得在运行时随机生成，否则 Gunicorn '
+        '多 Worker 下各进程 Session 签名密钥不一致，用户会被频繁登出或校验失败。'
+    )
+SECRET_KEY = _secret_key_env or secrets.token_hex(32)
 HOST = os.getenv('HOST', '0.0.0.0')
 PORT = int(os.getenv('PORT', 5000))
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -70,9 +76,15 @@ MAX_CONVERSATIONS_PER_USER = int(os.getenv('MAX_CONVERSATIONS_PER_USER', 50))
 # Image processing
 # ---------------------------------------------------------------------------
 MAX_UPSTREAM_IMAGES = int(os.getenv('MAX_UPSTREAM_IMAGES', 3))
+# 单会话内缓存的 Dify upload_file_id 条数上限（LRU：超出则丢弃最久未更新的键）
+MAX_DIFY_FILE_CACHE_ENTRIES = int(os.getenv('MAX_DIFY_FILE_CACHE_ENTRIES', 64))
 MAX_IMAGE_SIDE = int(os.getenv('MAX_IMAGE_SIDE', 1600))
 IMAGE_JPEG_QUALITY = int(os.getenv('IMAGE_JPEG_QUALITY', 82))
 MAX_COMPRESSED_IMAGE_BYTES = int(os.getenv('MAX_COMPRESSED_IMAGE_BYTES', 1_500_000))
+# 无 S3 或上传失败走 data URL 落库时，压缩后二进制不得超过此值（Base64 后更大，宜与上一项同阶或更严）
+MAX_DATA_URL_IMAGE_BYTES = int(
+    os.getenv('MAX_DATA_URL_IMAGE_BYTES', str(MAX_COMPRESSED_IMAGE_BYTES))
+)
 
 # ---------------------------------------------------------------------------
 # S3 / MinIO（对象存储；未配置时图片回退为 data URL）

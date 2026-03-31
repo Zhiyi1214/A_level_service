@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-import redis
-from redis.exceptions import RedisError
 from sqlalchemy import func, select
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from config import settings
@@ -18,37 +15,6 @@ from extensions import db
 from models import Conversation, Message, User, UserIdentity
 
 log = logging.getLogger(__name__)
-
-_IMG_CACHE_PREFIX = 'a_level:imgcache:'
-_IMG_CACHE_TTL_SEC = 7200
-
-
-def _encode_images_for_redis(images: list) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for img in images:
-        if not isinstance(img, dict):
-            continue
-        d = dict(img)
-        c = d.get('content')
-        if isinstance(c, bytes):
-            d['content'] = base64.b64encode(c).decode('ascii')
-            d['__content_b64__'] = True
-        out.append(d)
-    return out
-
-
-def _decode_images_from_redis(data: list) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        d = dict(item)
-        if d.pop('__content_b64__', False):
-            raw = d.get('content', '')
-            if isinstance(raw, str):
-                d['content'] = base64.b64decode(raw)
-        out.append(d)
-    return out
 
 
 def _to_utc(dt: datetime | str) -> datetime:
@@ -78,16 +44,6 @@ class PostgresStore:
     def __init__(self, dsn: str):
         # 保留参数以兼容 storage.__init__；实际连接串来自 app.config['SQLALCHEMY_DATABASE_URI']
         _ = dsn
-        self._image_cache_local: dict[str, list] = {}
-        self._redis_img: redis.Redis | None = None
-        if settings.REDIS_URL:
-            self._redis_img = redis.from_url(
-                settings.REDIS_URL,
-                decode_responses=True,
-            )
-
-    def _image_cache_key(self, session_id: str) -> str:
-        return f'{_IMG_CACHE_PREFIX}{session_id}'
 
     def create(
         self, session_id: str, user_id: str, source_id: str, source_name: str
@@ -234,13 +190,6 @@ class PostgresStore:
             return False
         db.session.delete(conv)
         db.session.commit()
-        if self._redis_img is not None:
-            try:
-                self._redis_img.delete(self._image_cache_key(session_id))
-            except RedisError:
-                log.warning("redis delete image cache failed session_id=%s", session_id)
-        else:
-            self._image_cache_local.pop(session_id, None)
         return True
 
     def append_message(
@@ -265,6 +214,44 @@ class PostgresStore:
             conv.upstream_conversation_id = upstream_conversation_id
             db.session.commit()
 
+    def get_dify_file_cache(self, session_id: str) -> dict[str, str]:
+        conv = db.session.get(Conversation, session_id)
+        if conv is None:
+            return {}
+        raw = conv.dify_file_cache
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, str] = {}
+        for k, v in raw.items():
+            if isinstance(k, str) and isinstance(v, str) and k and v:
+                out[k] = v
+        return out
+
+    def put_dify_file_cache_entry(
+        self, session_id: str, content_sha256: str, upload_file_id: str
+    ) -> None:
+        h = (content_sha256 or '').strip()
+        fid = (upload_file_id or '').strip()
+        if not h or not fid:
+            return
+        conv = db.session.get(Conversation, session_id)
+        if conv is None:
+            return
+        cache: dict[str, str] = {}
+        prev = conv.dify_file_cache
+        if isinstance(prev, dict):
+            for k, v in prev.items():
+                if isinstance(k, str) and isinstance(v, str) and k and v:
+                    cache[k] = v
+        if h in cache:
+            del cache[h]
+        cache[h] = fid
+        limit = max(1, settings.MAX_DIFY_FILE_CACHE_ENTRIES)
+        while len(cache) > limit:
+            cache.pop(next(iter(cache)))
+        conv.dify_file_cache = cache
+        db.session.commit()
+
     def count_by_user(self, user_id: str) -> int:
         n = db.session.scalar(
             select(func.count())
@@ -288,39 +275,6 @@ class PostgresStore:
             return False
         return self.delete(oldest_id)
 
-    def set_image_cache(self, session_id: str, images: list) -> None:
-        if self._redis_img is not None:
-            payload = json.dumps(
-                _encode_images_for_redis(images),
-                ensure_ascii=False,
-            )
-            self._redis_img.set(
-                self._image_cache_key(session_id),
-                payload,
-                ex=_IMG_CACHE_TTL_SEC,
-            )
-        else:
-            self._image_cache_local[session_id] = images
-
-    def get_image_cache(self, session_id: str) -> list:
-        if self._redis_img is not None:
-            try:
-                raw = self._redis_img.get(self._image_cache_key(session_id))
-            except RedisError:
-                log.warning("redis get image cache failed session_id=%s", session_id)
-                return []
-            if not raw:
-                return []
-            try:
-                data = json.loads(raw)
-                if not isinstance(data, list):
-                    return []
-                return _decode_images_from_redis(data)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                log.warning("image cache decode failed session_id=%s", session_id)
-                return []
-        return self._image_cache_local.get(session_id, [])
-
     def get_user(self, user_id: str) -> dict | None:
         u = db.session.get(User, user_id)
         if u is None:
@@ -341,47 +295,47 @@ class PostgresStore:
         display_name: str | None,
         avatar_url: str | None,
     ) -> str:
-        uid = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
-        db.session.add(
-            User(
-                id=uid,
-                email=email,
-                display_name=display_name,
-                avatar_url=avatar_url,
-                created_at=now,
+        for _attempt in range(2):
+            identity = db.session.scalar(
+                select(UserIdentity).where(
+                    UserIdentity.provider == provider,
+                    UserIdentity.provider_subject == provider_subject,
+                )
             )
+            if identity is not None:
+                uid = identity.user_id
+                user = db.session.get(User, uid)
+                if user is not None:
+                    user.email = email
+                    user.display_name = display_name
+                    user.avatar_url = avatar_url
+                db.session.commit()
+                return uid
+
+            uid = str(uuid.uuid4())
+            db.session.add(
+                User(
+                    id=uid,
+                    email=email,
+                    display_name=display_name,
+                    avatar_url=avatar_url,
+                    created_at=now,
+                )
+            )
+            db.session.add(
+                UserIdentity(
+                    user_id=uid,
+                    provider=provider,
+                    provider_subject=provider_subject,
+                    created_at=now,
+                )
+            )
+            try:
+                db.session.commit()
+                return uid
+            except IntegrityError:
+                db.session.rollback()
+        raise RuntimeError(
+            'upsert_user_from_provider: concurrent identity insert retry exhausted'
         )
-        db.session.flush()
-
-        stmt = (
-            insert(UserIdentity)
-            .values(
-                user_id=uid,
-                provider=provider,
-                provider_subject=provider_subject,
-                created_at=now,
-            )
-            .on_conflict_do_update(
-                constraint='uq_user_identity_provider_subject',
-                set_={
-                    'user_id': UserIdentity.user_id,
-                    'created_at': UserIdentity.created_at,
-                },
-            )
-            .returning(UserIdentity.user_id)
-        )
-        actual_uid = db.session.execute(stmt).scalar_one()
-
-        if actual_uid != uid:
-            orphan = db.session.get(User, uid)
-            if orphan is not None:
-                db.session.delete(orphan)
-
-        user = db.session.get(User, actual_uid)
-        if user is not None:
-            user.email = email
-            user.display_name = display_name
-            user.avatar_url = avatar_url
-        db.session.commit()
-        return actual_uid

@@ -1,7 +1,12 @@
+import psycogreen.gevent
+
+psycogreen.gevent.patch_psycopg()
+
 import logging
 from datetime import datetime, timedelta
 
 from flask import Flask, jsonify, make_response, render_template
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import settings
 from extensions import init_extensions, limiter
@@ -20,6 +25,15 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = settings.SESSION_COOKIE_SECURE
 app.config['MAX_CONTENT_LENGTH'] = settings.MAX_CONTENT_LENGTH
+
+# 信任一层反向代理（如 Nginx），使 request.remote_addr / X-Forwarded-* 对 Flask-Limiter 等生效
+app.wsgi_app = ProxyFix(
+    app.wsgi_app,
+    x_for=1,
+    x_proto=1,
+    x_host=1,
+    x_prefix=1,
+)
 
 logging.basicConfig(level=settings.LOG_LEVEL)
 log = app.logger

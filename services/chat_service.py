@@ -100,6 +100,9 @@ def iter_source_api_stream(
 
     meta events {'kind': 'meta', 'conversation_id', 'message_id', ...} may appear
     when the upstream includes them in SSE payloads.
+
+    For dify_chat, *image_files* must be the current request's uploads only (not a
+    multi-turn cache), so Dify does not re-upload past images each round.
     """
     if not source:
         yield {'kind': 'error', 'message': 'source is required'}
@@ -111,6 +114,7 @@ def iter_source_api_stream(
     source_type = source.get('type')
     try:
         if source_type == 'dify_chat':
+            # image_files 须为本轮请求的新附件；勿传入历史会话缓存，以免重复上传污染上下文
             yield from _stream_dify_chat(
                 source, message, conversation_id, user_id, image_files
             )
@@ -336,6 +340,7 @@ def _handle_dify_sse_obj(
 
 
 def _stream_dify_chat(source, message, conversation_id, user_id, image_files=None):
+    """Streaming Dify chat. *image_files* must be files attached in this turn only."""
     api_endpoint = f"{source['api_url']}{source.get('chat_endpoint', '/chat-messages')}"
     headers = _source_headers(source)
     payload = {
@@ -345,6 +350,7 @@ def _stream_dify_chat(source, message, conversation_id, user_id, image_files=Non
         'conversation_id': sanitize_conversation_id(conversation_id),
         'user': user_id,
     }
+    # 仅上传本轮列表中的图片；调用方不得传入跨轮缓存
     if image_files:
         payload['files'] = []
         for img in image_files:
