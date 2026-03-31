@@ -4,20 +4,42 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Assistant - Powered by Dify</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@1,600;1,700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v={{ asset_tag }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/katex/katex.min.css') }}">
 </head>
 <body data-theme="dark">
     <div id="loginScreen" class="login-screen login-screen--hidden" aria-live="polite">
-        <div class="login-screen-panel">
-            <div class="login-screen-copy">
-                <span class="login-screen-title">A Level</span>
-                <span class="login-screen-subtitle">Assistant</span>
+        <div class="login-screen-hero" aria-label="A星，A Level Assistant">
+            <div class="login-screen-hero-brand-wrap">
+                <div class="login-screen-brand-cluster">
+                    <div class="login-screen-brand-a" aria-hidden="true">
+                        <span class="login-screen-brand-a-inner">
+                            <span class="login-screen-brand-a-letter">A</span>
+                            <span class="login-screen-brand-a-star" aria-hidden="true">*</span>
+                        </span>
+                        <div class="login-screen-brand-words">
+                            <div class="login-screen-brand-rotate" aria-hidden="true">
+                                <span class="login-screen-brand-line login-screen-brand-line--visible">level</span>
+                                <span class="login-screen-brand-line login-screen-brand-line--em">I</span>
+                                <span class="login-screen-brand-line">ssistant</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
-            <p id="loginScreenMessage" class="login-screen-message login-screen-message--hidden"></p>
-            <a id="loginScreenGoogleBtn" class="sidebar-capsule sidebar-capsule--auth sidebar-capsule--clickable auth-google-capsule auth-google-capsule--hero" href="/auth/google">
-                <span class="auth-google-capsule-label">Google 登录</span>
-            </a>
+            <div class="login-screen-actions">
+                <p id="loginScreenMessage" class="login-screen-message login-screen-message--hidden"></p>
+                <div class="login-screen-button-stack" role="group" aria-label="登录方式">
+                    <a id="loginScreenGoogleBtn" class="sidebar-capsule sidebar-capsule--auth sidebar-capsule--clickable auth-google-capsule auth-google-capsule--hero login-screen-oauth-btn" href="/auth/google">
+                        <span class="auth-google-capsule-label">Google 登录</span>
+                    </a>
+                    <button type="button" class="login-screen-btn" disabled title="登录渠道尚未接入">方式二（即将开放）</button>
+                    <button type="button" class="login-screen-btn" disabled title="登录渠道尚未接入">方式三（即将开放）</button>
+                </div>
+            </div>
         </div>
     </div>
     <div class="app-container">
@@ -54,30 +76,28 @@
         <main class="main-content">
             <header class="main-chrome">
                 <div class="main-chrome-brand">
-                    <div class="logo logo--compact">
-                        <span class="logo-icon">✦</span>
-                        <div class="logo-copy">
-                            <span class="logo-text">A Level</span>
-                            <span class="logo-subtext">Assistant</span>
-                        </div>
+                    <div class="logo logo--compact logo--header-brand" aria-label="A Level Assistant">
+                        <span class="app-brand-mark app-brand-mark--header" aria-hidden="true">
+                            <span class="app-brand-mark-inner">
+                                <span class="app-brand-mark-letter">A</span>
+                                <span class="app-brand-mark-star">*</span>
+                            </span>
+                        </span>
                     </div>
                 </div>
                 <h1 class="main-chrome-title" id="currentSourceTitle">请选择知识库</h1>
                 <div class="main-chrome-spacer" aria-hidden="true"></div>
             </header>
 
-            <div class="chat-container">
-                <div id="messagesArea" class="messages-area">
-                    <div class="welcome-section">
-                        <div class="welcome-orb">
-                            <span class="welcome-orb-core"></span>
-                            <span class="welcome-orb-ring welcome-orb-ring-one"></span>
-                            <span class="welcome-orb-ring welcome-orb-ring-two"></span>
-                        </div>
-                    </div>
-                </div>
+            <div class="chat-container" id="chatContainer">
+                <div id="messagesArea" class="messages-area" role="log" aria-live="polite"></div>
 
-                <div class="input-area">
+                <div class="composer-dock" id="composerDock">
+                    <div class="empty-composer-greeting" id="emptyComposerGreeting" aria-hidden="true">
+                        <p class="empty-composer-greeting-line1" id="emptyComposerGreetingLine1"></p>
+                        <p class="empty-composer-greeting-line2">你可以问我任何 A-level 问题</p>
+                    </div>
+                    <div class="input-area">
                     <div class="input-box-container">
                         <div id="uploadedFiles" class="uploaded-files"></div>
                         <button class="attach-btn" id="fileUploadBtn" type="button" onclick="document.getElementById('fileInput').click()" title="上传图片">
@@ -110,7 +130,8 @@
                         </div>
                     </div>
                     <div class="app-meta">
-                        <span class="footer-version">Made by Ray zhang (v{{ frontend_version }})</span>
+                        <span class="footer-version">Made by Zhiyi zhang Beta (v{{ frontend_version }})</span>
+                    </div>
                     </div>
                 </div>
             </div>

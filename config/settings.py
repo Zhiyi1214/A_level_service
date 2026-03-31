@@ -66,6 +66,15 @@ if FLASK_ENV == 'production' and len(CORS_ORIGINS) == 1 and CORS_ORIGINS[0] == '
 # Rate limiter
 # ---------------------------------------------------------------------------
 RATELIMIT_STORAGE_URI = os.getenv('RATELIMIT_STORAGE_URI', 'memory://')
+# 全局限流开关（False 时 @limiter.limit 与 default_limits 均不生效，便于测试；生产务必 true）
+# 未设置时：development 默认关，其余（含 production）默认开。
+_rate_flag = (os.getenv('RATELIMIT_ENABLED') or '').strip().lower()
+if _rate_flag in ('0', 'false', 'no', 'off'):
+    RATELIMIT_ENABLED = False
+elif _rate_flag in ('1', 'true', 'yes', 'on'):
+    RATELIMIT_ENABLED = True
+else:
+    RATELIMIT_ENABLED = FLASK_ENV != 'development'
 
 # ---------------------------------------------------------------------------
 # File upload

@@ -89,12 +89,23 @@ textarea {
 }
 
 .login-screen {
+    /* 非 0 时增加错误提示与按钮栈之间的固定间距（四段 flex 空白仍彼此相等） */
+    --login-stack-offset-top: 0px;
+    --login-oauth-radius: 22px;
+    /* 登录三条入口统一最小高度（Google 外链 + 两枚占位按钮 + 内层 label 联动） */
+    --login-btn-min-height: 96px;
+    --login-btn-stack-gap: clamp(8px, 1.4vh, 16px);
     position: fixed;
     inset: 0;
     display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 24px;
+    flex-direction: row;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 24px;
+    min-height: 100vh;
+    min-height: 100dvh;
+    padding: 28px 8vw 28px 36px;
+    box-sizing: border-box;
     background: var(--app-chrome-main);
     z-index: 100;
 }
@@ -103,42 +114,271 @@ textarea {
     display: none;
 }
 
-.login-screen-panel {
-    width: min(100%, 460px);
+/*
+ * hero 左：品牌区垂直居中；右：登录按钮顶对齐（整体在轮换词 / assistant 一带上方）。
+ */
+.login-screen-hero {
+    flex: 1 1 auto;
     display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 20px;
+    flex-direction: row;
+    align-items: stretch;
+    align-self: stretch;
+    justify-content: flex-start;
+    gap: clamp(16px, 3vw, 32px);
+    min-width: 0;
+    min-height: 0;
+    width: 100%;
 }
 
-.login-screen-copy {
+.login-screen-hero-brand-wrap {
+    flex: 1 1 auto;
     display: flex;
-    flex-direction: column;
     align-items: center;
-    gap: 4px;
-    text-align: center;
+    justify-content: flex-start;
+    min-width: 0;
+    min-height: 0;
 }
 
-.login-screen-title {
-    font-size: 32px;
-    font-weight: 600;
+.login-screen-brand-cluster {
+    flex: 0 1 auto;
+    max-width: min(58vw, 720px);
+    min-width: 0;
+    min-height: 0;
+}
+
+/*
+ * 登录品牌唯一尺度：--brand-a-cap（与视口的 min(vh,vw,cap) 一致）。
+ * A 的 font-size、轮换词、占位高度全部用 calc(cap * 比例)，无 transform 缩放。
+ */
+.login-screen-brand-a {
+    --brand-a-cap: min(92vh, 56vw, 720px);
+    --brand-word-ratio: 0.32;
+    --brand-word-ratio-em: 0.38;
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    margin: 60px 0 0 120px;
+    padding: 0 4px 0 0;
+    user-select: none;
+}
+
+/* * 锚在 A 字形右上角 */
+.login-screen-brand-a-inner {
+    position: relative;
+    display: inline-block;
+    font-family: "Playfair Display", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, ui-serif, serif;
+    font-weight: 700;
+    font-style: italic;
+    font-synthesis: none;
+    letter-spacing: -0.05em;
+    line-height: 0.88;
     color: var(--text-primary);
+    /* 比 --brand-a-cap 略大：只放大 A*，轮换词仍用 cap 算字号 */
+    font-size: calc(var(--brand-a-cap) * 1.14);
 }
 
-.login-screen-subtitle {
-    font-size: 18px;
+.login-screen-brand-a-letter {
+    display: inline-block;
+}
+
+/* 星号：无衬线，尺寸相对 A 的 em */
+.login-screen-brand-a-star {
+    position: absolute;
+    top: 0.02em;
+    right: -0.4em;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-style: normal;
+    font-weight: 400;
+    font-size: 0.66em;
+    line-height: 1;
+    letter-spacing: 0;
+    color: inherit;
+    pointer-events: none;
+}
+
+/* 锚点：相对 .login-screen-brand-a 右下角；nudge-y 负值 = 相对 A 往上移（随 cap 比例） */
+.login-screen-brand-words {
+    --login-brand-anchor-gap-x: clamp(6px, 1.2vw, 20px);
+    --login-brand-anchor-nudge-x: 0px;
+    --login-brand-anchor-nudge-y: calc(var(--brand-a-cap) * -0.001);
+    position: absolute;
+    left: 100%;
+    bottom: 0;
+    margin: 0 0 0 var(--login-brand-anchor-gap-x);
+    transform: translate(var(--login-brand-anchor-nudge-x), var(--login-brand-anchor-nudge-y));
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-start;
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+}
+
+/* 占位高度与最大一行（I）同步，避免切换时跳动 */
+.login-screen-brand-rotate {
+    position: relative;
+    flex: 0 0 auto;
+    min-height: calc(var(--brand-a-cap) * var(--brand-word-ratio-em) * 1.05);
+    min-width: calc(var(--brand-a-cap) * 0.42);
+}
+
+.login-screen-brand-line {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    margin: 0;
+    padding: 0;
+    font-family: "Playfair Display", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, ui-serif, serif;
+    font-style: italic;
+    font-synthesis: none;
+    font-weight: 600;
+    letter-spacing: -0.05em;
+    line-height: 1;
+    color: var(--text-primary);
+    white-space: nowrap;
+    font-size: calc(var(--brand-a-cap) * var(--brand-word-ratio));
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.55s ease;
+}
+
+.login-screen-brand-line--em {
+    font-weight: 700;
+    font-size: calc(var(--brand-a-cap) * var(--brand-word-ratio-em));
+}
+
+.login-screen-brand-line--visible {
+    opacity: 1;
+    z-index: 1;
+}
+
+/* 右侧：顶对齐，按钮紧凑竖排（与左侧 assistant 词带上下错开） */
+.login-screen-actions {
+    flex: 0 1 420px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    align-self: flex-start;
+    width: min(420px, 38vw);
+    min-width: min(280px, 100%);
+    min-height: 0;
+    box-sizing: border-box;
+    padding-top: var(--login-stack-offset-top);
+}
+
+.login-screen-button-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    flex: 0 0 auto;
+    gap: var(--login-btn-stack-gap);
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.login-screen-button-stack .login-screen-oauth-btn,
+.login-screen-button-stack .login-screen-btn {
+    flex: 0 0 auto;
+    min-height: var(--login-btn-min-height);
+    width: 100%;
+    max-width: none;
+    box-sizing: border-box;
+}
+
+/* 登录页 Google：与占位按钮同圆角，内部文字垂直居中并随条带增高 */
+.login-screen .auth-google-capsule--hero.login-screen-oauth-btn {
+    min-height: var(--login-btn-min-height);
+    border-radius: var(--login-oauth-radius);
+    padding: 0 24px;
+    align-items: stretch;
+}
+
+.login-screen .auth-google-capsule--hero .auth-google-capsule-label {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--login-btn-min-height);
+    font-size: 34px;
+    font-weight: 600;
+}
+
+.login-screen-btn {
+    margin: 0;
+    padding: 12px 24px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--login-oauth-radius);
+    background: var(--bg-elevated);
     color: var(--text-secondary);
+    font: inherit;
+    font-size: 30px;
+    font-weight: 600;
+    line-height: 1.2;
+    text-align: center;
+    cursor: not-allowed;
+    opacity: 0.72;
+    transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.login-screen-btn:disabled {
+    pointer-events: none;
 }
 
 .login-screen-message {
+    flex-shrink: 0;
+    margin: 0 0 4px;
     min-height: 22px;
+    width: 100%;
     color: var(--danger-color);
     font-size: 13px;
-    text-align: center;
+    text-align: left;
 }
 
 .login-screen-message--hidden {
     visibility: hidden;
+}
+
+@media (max-width: 900px) {
+    .login-screen {
+        flex-direction: column;
+        align-items: stretch;
+        padding: 20px 20px 24px;
+        gap: 20px;
+    }
+
+    .login-screen-hero {
+        flex: 0 0 auto;
+        flex-direction: column;
+        align-items: stretch;
+        min-height: min(42vh, 320px);
+    }
+
+    .login-screen-hero-brand-wrap {
+        flex: 0 0 auto;
+        min-height: min(38vh, 280px);
+        justify-content: center;
+    }
+
+    .login-screen-brand-cluster {
+        max-width: none;
+        width: 100%;
+    }
+
+    .login-screen-brand-a {
+        --brand-a-cap: min(34vh, 46vw, 248px);
+        margin: 50px 0 0 50px;
+    }
+
+    .login-screen-actions {
+        flex: 0 0 auto;
+        order: -1;
+        width: 100%;
+        max-width: none;
+        min-width: 0;
+        align-self: stretch;
+        padding-top: 0;
+    }
 }
 
 .app-container {
@@ -412,6 +652,61 @@ body[data-theme="light"] .shell-rail-btn:hover {
 
 .logo--compact {
     gap: 10px;
+}
+
+.logo--header-brand {
+    gap: 0;
+}
+
+/* 与登录页 A* 同族：Playfair Display 斜体 + 右上角无衬线星号 */
+.app-brand-mark {
+    position: relative;
+    display: inline-block;
+    font-family: "Playfair Display", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, ui-serif, serif;
+    font-weight: 700;
+    font-style: italic;
+    font-synthesis: none;
+    letter-spacing: -0.05em;
+    line-height: 0.88;
+    color: var(--text-primary);
+    user-select: none;
+}
+
+.app-brand-mark-inner {
+    position: relative;
+    display: inline-block;
+}
+
+.app-brand-mark-letter {
+    display: inline-block;
+}
+
+.app-brand-mark-star {
+    position: absolute;
+    top: 0.02em;
+    right: -0.4em;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-style: normal;
+    font-weight: 400;
+    font-size: 0.66em;
+    line-height: 1;
+    letter-spacing: 0;
+    color: inherit;
+    pointer-events: none;
+}
+
+.app-brand-mark--header {
+    font-size: clamp(27px, 4vw, 38px);
+}
+
+.app-brand-mark--avatar {
+    font-size: 24px;
+    line-height: 0.88;
+}
+
+.app-brand-mark--avatar .app-brand-mark-star {
+    font-size: 0.66em;
+    right: -0.4em;
 }
 
 .logo--compact .logo-icon {
@@ -703,6 +998,60 @@ body[data-theme="light"] .shell-rail-btn:hover {
     width: 100%;
 }
 
+.chat-container.chat-container--composer-centered {
+    justify-content: center;
+}
+
+.chat-container.chat-container--composer-centered .messages-area {
+    display: none;
+}
+
+.composer-dock {
+    flex-shrink: 0;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.chat-container.chat-container--composer-centered .composer-dock {
+    width: min(100%, 940px);
+    margin: 0 auto;
+    padding: 0 28px;
+}
+
+.chat-container.chat-container--composer-centered .input-area {
+    width: 100%;
+    padding-left: 0;
+    padding-right: 0;
+}
+
+.empty-composer-greeting {
+    display: none;
+    margin: 0 0 22px;
+    padding-left: 15px;
+    text-align: left;
+}
+
+.chat-container.chat-container--composer-centered .empty-composer-greeting {
+    display: block;
+}
+
+.empty-composer-greeting-line1 {
+    font-size: 25px;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin: 0 0 10px;
+    line-height: 1.35;
+}
+
+.empty-composer-greeting-line2 {
+    font-size: clamp(22px, 4.2vw, 32px);
+    font-weight: 650;
+    color: var(--text-primary);
+    margin: 0;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+}
+
 .messages-area {
     flex: 1;
     min-height: 0;
@@ -830,8 +1179,33 @@ body[data-theme="light"] .shell-rail-btn:hover {
     background: var(--primary-color);
 }
 
+.message.user .message-avatar.message-avatar--initial {
+    font-size: 16px;
+    font-weight: 700;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1;
+}
+
 .message.assistant .message-avatar {
     color: var(--accent-color);
+}
+
+.message.assistant .message-avatar.message-avatar--brand {
+    width: auto;
+    height: auto;
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    margin-top: 4px;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    color: var(--text-primary);
+    overflow: visible;
+    font-size: unset;
+    line-height: 0;
+    align-self: flex-start;
 }
 
 .message-bubble {
@@ -1394,6 +1768,14 @@ body[data-theme="light"] .shell-rail-btn:hover {
         padding: 0 14px 16px;
     }
 
+    .chat-container.chat-container--composer-centered .composer-dock {
+        padding: 0 14px;
+    }
+
+    .empty-composer-greeting {
+        margin-bottom: 18px;
+    }
+
     .input-box-container {
         align-items: stretch;
     }
@@ -1447,6 +1829,19 @@ body[data-theme="light"] .shell-rail-btn:hover {
         width: 30px;
         height: 30px;
         border-radius: 12px;
+    }
+
+    .message.assistant .message-avatar.message-avatar--brand {
+        width: auto;
+        height: auto;
+    }
+
+    .message.user .message-avatar.message-avatar--initial {
+        font-size: 14px;
+    }
+
+    .app-brand-mark--avatar {
+        font-size: 21px;
     }
 
     .message-bubble {

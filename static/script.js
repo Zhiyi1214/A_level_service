@@ -3,6 +3,44 @@ let currentConversationId = null;
 let uploadedFiles = [];
 let oauthConfigured = false;
 let authUser = null;
+let loginBrandRotateTimer = null;
+const LOGIN_BRAND_ROTATE_MS = 2400;
+
+function startLoginBrandRotate() {
+    const wrap = document.querySelector('.login-screen-brand-rotate');
+    if (!wrap || loginBrandRotateTimer) {
+        return;
+    }
+    const items = wrap.querySelectorAll('.login-screen-brand-line');
+    if (!items.length) {
+        return;
+    }
+    let idx = 0;
+    function applyIndex() {
+        items.forEach((el, j) => {
+            el.classList.toggle('login-screen-brand-line--visible', j === idx);
+        });
+    }
+    applyIndex();
+    loginBrandRotateTimer = window.setInterval(() => {
+        idx = (idx + 1) % items.length;
+        applyIndex();
+    }, LOGIN_BRAND_ROTATE_MS);
+}
+
+function stopLoginBrandRotate() {
+    if (loginBrandRotateTimer) {
+        window.clearInterval(loginBrandRotateTimer);
+        loginBrandRotateTimer = null;
+    }
+    const wrap = document.querySelector('.login-screen-brand-rotate');
+    if (wrap) {
+        const items = wrap.querySelectorAll('.login-screen-brand-line');
+        items.forEach((el, j) => {
+            el.classList.toggle('login-screen-brand-line--visible', j === 0);
+        });
+    }
+}
 let lastEnterDownMs = 0;
 let sendBtnDefaultHtml = '';
 let availableSources = [];
@@ -125,6 +163,11 @@ function applyAuthView(authStatus = '') {
     if (loginScreen) {
         loginScreen.classList.toggle('login-screen--hidden', !gateActive);
     }
+    if (gateActive) {
+        window.requestAnimationFrame(() => { startLoginBrandRotate(); });
+    } else {
+        stopLoginBrandRotate();
+    }
     if (appContainer) {
         appContainer.classList.toggle('app-container--hidden', gateActive);
     }
@@ -164,6 +207,7 @@ function renderAuthPanel() {
     if (!oauthConfigured || !authUser) {
         panel.innerHTML = '';
         panel.classList.add('auth-panel--hidden');
+        applyComposerDockLayout();
         return;
     }
     panel.classList.remove('auth-panel--hidden');
@@ -181,6 +225,7 @@ function renderAuthPanel() {
     if (btn) {
         btn.addEventListener('click', () => { logoutAuth(); });
     }
+    applyComposerDockLayout();
 }
 
 function renderSidebarStatus(message = '') {
@@ -370,6 +415,107 @@ function getConversationMessagesForView(conversationId) {
     return serverMessages.concat(state.localMessages);
 }
 
+function shouldCenterComposer() {
+    const messagesArea = document.getElementById('messagesArea');
+    if (!messagesArea) {
+        return false;
+    }
+    if (messagesArea.querySelector('.messages-area-loading')) {
+        return false;
+    }
+    return !messagesArea.querySelector('.message');
+}
+
+function getGreetingDisplayName() {
+    if (authUser) {
+        const n = (authUser.display_name || authUser.email || '').trim();
+        if (n) {
+            return n;
+        }
+    }
+    return '同学';
+}
+
+/** 用户气泡头像：展示名或邮箱的首字符（支持多字节首字） */
+function getUserAvatarInitial() {
+    const raw = (authUser && (authUser.display_name || authUser.email) || '').trim();
+    if (!raw) {
+        return '?';
+    }
+    const first = Array.from(raw)[0];
+    return first || '?';
+}
+
+function prefersComposerMotionReduced() {
+    try {
+        return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    } catch (e) {
+        return false;
+    }
+}
+
+/**
+ * 空会话时输入区垂直居中并显示问候；有消息后固定在底部。
+ * @param {{ preferAnimate?: boolean, firstRect?: DOMRect | null }} options
+ *        preferAnimate + firstRect：从居中首次出现消息时的 FLIP 平移（发送首条消息）。
+ */
+function applyComposerDockLayout(options = {}) {
+    const preferAnimate = !!(options && options.preferAnimate);
+    const firstRect = options && options.firstRect ? options.firstRect : null;
+    const container = document.getElementById('chatContainer');
+    const dock = document.getElementById('composerDock');
+    const line1 = document.getElementById('emptyComposerGreetingLine1');
+    const greet = document.getElementById('emptyComposerGreeting');
+    if (!container || !dock) {
+        return;
+    }
+
+    const center = shouldCenterComposer();
+    const name = getGreetingDisplayName();
+    if (line1) {
+        line1.textContent = `${name}，你好`;
+    }
+    if (greet) {
+        greet.setAttribute('aria-hidden', center ? 'false' : 'true');
+    }
+
+    container.classList.toggle('chat-container--composer-centered', center);
+
+    const doAnimate = preferAnimate && firstRect && !center && !prefersComposerMotionReduced();
+    if (doAnimate) {
+        requestAnimationFrame(() => {
+            const last = dock.getBoundingClientRect();
+            const dy = firstRect.top - last.top;
+            if (Math.abs(dy) < 1.5) {
+                dock.style.transition = '';
+                dock.style.transform = '';
+                return;
+            }
+            dock.style.transition = 'none';
+            dock.style.transform = `translateY(${dy}px)`;
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    dock.style.transition = 'transform 0.45s cubic-bezier(0.22, 1, 0.36, 1)';
+                    dock.style.transform = 'translateY(0)';
+                    const cleanup = (e) => {
+                        if (e && e.propertyName && e.propertyName !== 'transform') {
+                            return;
+                        }
+                        dock.removeEventListener('transitionend', cleanup);
+                        dock.style.transition = '';
+                        dock.style.transform = '';
+                    };
+                    dock.addEventListener('transitionend', cleanup);
+                    window.setTimeout(cleanup, 520);
+                });
+            });
+        });
+    } else {
+        dock.style.transition = '';
+        dock.style.transform = '';
+    }
+}
+
 function conversationServerMessagesEqual(a, b) {
     const aa = Array.isArray(a) ? a : [];
     const bb = Array.isArray(b) ? b : [];
@@ -391,6 +537,9 @@ function renderConversationView(conversationId, options = {}) {
     const preserveScroll = !!(options && options.preserveScroll);
     const messagesArea = document.getElementById('messagesArea');
     if (!messagesArea) return;
+    const wasEmptyView = shouldCenterComposer();
+    const dock = document.getElementById('composerDock');
+    const firstRect = wasEmptyView && dock ? dock.getBoundingClientRect() : null;
     const messages = getConversationMessagesForView(conversationId);
     let prevScrollHeight = 0;
     let prevScrollTop = 0;
@@ -400,7 +549,7 @@ function renderConversationView(conversationId, options = {}) {
     }
     messagesArea.innerHTML = '';
     if (!messages.length) {
-        messagesArea.innerHTML = renderWelcomeState();
+        applyComposerDockLayout();
         return;
     }
     const state = getConversationState(conversationId);
@@ -421,8 +570,13 @@ function renderConversationView(conversationId, options = {}) {
         addMessageToUI(msg.role, msg.content, {
             pending: !!msg.pending,
             requestId: msg.requestId || undefined,
-            skipScroll: true
+            skipScroll: true,
+            skipDockLayout: true
         });
+    });
+    applyComposerDockLayout({
+        preferAnimate: !!(wasEmptyView && firstRect),
+        firstRect
     });
     if (preserveScroll) {
         const delta = messagesArea.scrollHeight - prevScrollHeight;
@@ -470,19 +624,8 @@ document.addEventListener('DOMContentLoaded', async function() {
         loadSources();
         loadConversations();
     }
+    applyComposerDockLayout();
 });
-
-function renderWelcomeState() {
-    return `
-        <div class="welcome-section">
-            <div class="welcome-orb">
-                <span class="welcome-orb-core"></span>
-                <span class="welcome-orb-ring welcome-orb-ring-one"></span>
-                <span class="welcome-orb-ring welcome-orb-ring-two"></span>
-            </div>
-        </div>
-    `;
-}
 
 function renderMessagesLoadingPlaceholder() {
     return '<div class="messages-area-loading" role="status">加载会话…</div>';
@@ -1331,7 +1474,10 @@ function startNewChat() {
     setSourceLocked(false);
 
     const messagesArea = document.getElementById('messagesArea');
-    messagesArea.innerHTML = renderWelcomeState();
+    if (messagesArea) {
+        messagesArea.innerHTML = '';
+    }
+    applyComposerDockLayout();
     closeSidebar();
     loadConversations();
 }
@@ -2146,9 +2292,16 @@ function renderMessageBubble(bubble, role, content, options = {}) {
     }
 }
 
+/** 助手气泡头像：与顶栏相同的 A*（静态 HTML，无用户输入） */
+const ASSISTANT_AVATAR_MARK_HTML = '<span class="app-brand-mark app-brand-mark--avatar" aria-hidden="true"><span class="app-brand-mark-inner"><span class="app-brand-mark-letter">A</span><span class="app-brand-mark-star">*</span></span></span>';
+
 // Add message to UI
 function addMessageToUI(role, content, options = {}) {
     const messagesArea = document.getElementById('messagesArea');
+    const skipDockLayout = !!(options && options.skipDockLayout);
+    const wasEmptyView = shouldCenterComposer();
+    const dock = document.getElementById('composerDock');
+    const firstRect = !skipDockLayout && wasEmptyView && dock ? dock.getBoundingClientRect() : null;
     removeWelcomeSection();
 
     const message = document.createElement('div');
@@ -2162,7 +2315,16 @@ function addMessageToUI(role, content, options = {}) {
 
     const avatar = document.createElement('div');
     avatar.className = 'message-avatar';
-    avatar.textContent = role === 'user' ? '👤' : '🤖';
+    if (role === 'user') {
+        avatar.classList.add('message-avatar--initial');
+        const who = (authUser && (authUser.display_name || authUser.email || '').trim()) || '';
+        avatar.textContent = getUserAvatarInitial();
+        avatar.setAttribute('aria-label', who ? `我：${who}` : '我');
+    } else {
+        avatar.classList.add('message-avatar--brand');
+        avatar.innerHTML = ASSISTANT_AVATAR_MARK_HTML;
+        avatar.setAttribute('aria-label', '助手');
+    }
     
     const bubble = document.createElement('div');
     renderMessageBubble(bubble, role, content, options);
@@ -2176,6 +2338,12 @@ function addMessageToUI(role, content, options = {}) {
     }
     
     messagesArea.appendChild(message);
+    if (!skipDockLayout) {
+        applyComposerDockLayout({
+            preferAnimate: !!(wasEmptyView && firstRect),
+            firstRect
+        });
+    }
     if (!options.skipScroll) {
         scrollMessagesToBottom();
     }

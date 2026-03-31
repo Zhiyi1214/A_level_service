@@ -31,6 +31,7 @@ limiter = Limiter(
     key_func=get_remote_address,
     default_limits=["200 per day", "50 per hour"],
     storage_uri=settings.RATELIMIT_STORAGE_URI,
+    enabled=settings.RATELIMIT_ENABLED,
 )
 
 
@@ -59,6 +60,10 @@ def init_extensions(app):
             raise RuntimeError('CORS origins 含 * 时不应启用 supports_credentials')
         CORS(app, **_cors_kwargs)
     limiter.init_app(app)
+    if not settings.RATELIMIT_ENABLED:
+        app.logger.warning(
+            'RATELIMIT_ENABLED=false：Flask-Limiter 已全局禁用（仅用于测试/排障，生产请设为 true）'
+        )
     if settings.OAUTH_CONFIGURED:
         oauth.init_app(app)
         oauth.register(
