@@ -8,8 +8,8 @@ let lastEnterDownMs = 0;
 let sendBtnDefaultHtml = '';
 let availableSources = [];
 let selectedSourceId = '';
-const THEME_STORAGE_KEY = 'a_level_theme_v38';
-const SIDEBAR_COLLAPSED_STORAGE_KEY = 'a_level_sidebar_collapsed_v38';
+const THEME_STORAGE_KEY = 'a_level_theme_v46';
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'a_level_sidebar_collapsed_v46';
 const MAX_UPLOAD_IMAGES = 3;
 const conversationStates = new Map();
 
@@ -216,6 +216,31 @@ function removeLocalMessagesByRequest(conversationId, requestId) {
     state.localMessages = state.localMessages.filter(msg => msg.requestId !== requestId);
 }
 
+/** 若服务端拉取与流式终稿不一致，用终稿覆盖内存中最后一条助手消息（优先 done.response） */
+function patchLastAssistantMessageContent(conversationId, streamedText) {
+    if (!conversationId || streamedText == null || streamedText === '') {
+        return;
+    }
+    const state = getConversationState(conversationId);
+    if (!state || !state.serverConversation || !Array.isArray(state.serverConversation.messages)) {
+        return;
+    }
+    const msgs = state.serverConversation.messages;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role !== 'assistant') {
+            continue;
+        }
+        if (typeof msgs[i].content !== 'string') {
+            return;
+        }
+        if (msgs[i].content === streamedText) {
+            return;
+        }
+        msgs[i] = { ...msgs[i], content: streamedText };
+        return;
+    }
+}
+
 function replacePendingAssistantMessage(conversationId, requestId, content) {
     const state = getConversationState(conversationId);
     if (!state) return;
@@ -227,19 +252,17 @@ function replacePendingAssistantMessage(conversationId, requestId, content) {
     });
 }
 
-function patchPendingAssistantStream(conversationId, requestId, content) {
+/** 同步本地 pending 状态与当前 DOM 气泡（避免全量 renderConversationView 闪烁） */
+function applyStreamingAssistantUpdate(conversationId, requestId, fullText) {
     const state = getConversationState(conversationId);
-    if (!state) return;
-    state.localMessages = state.localMessages.map(msg => {
-        if (msg.requestId === requestId && msg.role === 'assistant' && msg.pending) {
-            return { ...msg, content, pending: true };
-        }
-        return msg;
-    });
-}
-
-/** 仅更新流式生成中的助手气泡，避免 renderConversationView 清空整页导致闪烁 */
-function updateStreamingAssistantBubble(conversationId, requestId, fullText) {
+    if (state) {
+        state.localMessages = state.localMessages.map(msg => {
+            if (msg.requestId === requestId && msg.role === 'assistant' && msg.pending) {
+                return { ...msg, content: fullText, pending: true };
+            }
+            return msg;
+        });
+    }
     if (currentConversationId !== conversationId || !requestId) {
         return;
     }
@@ -297,7 +320,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     console.log('🚀 AI Assistant initialized');
     try {
         if (typeof marked !== 'undefined' && typeof marked.setOptions === 'function') {
-            marked.setOptions({ gfm: true, breaks: true });
+            marked.setOptions({ gfm: true, breaks: true, async: false });
         }
     } catch (e) {
         console.warn('marked init skipped:', e);
@@ -307,9 +330,6 @@ document.addEventListener('DOMContentLoaded', async function() {
         sendBtnDefaultHtml = sb.innerHTML;
     }
     await initAuth();
-    if (!oauthConfigured) {
-        console.log('👤 Anonymous user:', anonymousUserId);
-    }
     initTheme();
     initSidebarState();
     syncSendBtn();
@@ -367,6 +387,97 @@ function getPurify() {
     return typeof DOMPurify !== 'undefined' ? DOMPurify : (typeof window !== 'undefined' && window.DOMPurify ? window.DOMPurify : null);
 }
 
+/** marked v12+ 在部分配置下会返回 Promise；强制同步并打开 GFM，避免回退成纯文本导致 ## 原样显示 */
+const MARKED_PARSE_OPTS = { async: false, gfm: true, breaks: true };
+
+/**
+ * 将 API 返回的 content 规范为「字符串」或「多段数组」。
+ * JSONB/序列化偶发把 [{type,text},{type:image}] 落成一段 JSON 字符串，原先会整段 escape 成乱码。
+ */
+function coerceMessageContent(raw) {
+    if (raw == null) {
+        return '';
+    }
+    if (Array.isArray(raw)) {
+        return raw;
+    }
+    if (typeof raw === 'object') {
+        return raw;
+    }
+    if (typeof raw !== 'string') {
+        return String(raw);
+    }
+    let s = raw.trim();
+    for (let attempt = 0; attempt < 2; attempt++) {
+        if (!s.startsWith('[{')) {
+            break;
+        }
+        if (!/"(?:type|text|url)"\s*:/.test(s)) {
+            break;
+        }
+        try {
+            const parsed = JSON.parse(s);
+            if (Array.isArray(parsed)) {
+                return parsed;
+            }
+            if (typeof parsed === 'string') {
+                s = parsed.trim();
+                continue;
+            }
+            break;
+        } catch (e) {
+            break;
+        }
+    }
+    return s;
+}
+
+/**
+ * 用户气泡/预览：纯文本被存成带首尾 ASCII/弯引号的「JSON 字符串壳」时剥掉（与助手 decode 分开，避免误伤）。
+ */
+function normalizeUserPlainTextForDisplay(raw) {
+    if (raw == null || typeof raw !== 'string') {
+        return raw;
+    }
+    let cur = raw.trim().replace(/^\uFEFF/, '');
+    if (!cur) {
+        return '';
+    }
+    for (let i = 0; i < 4; i++) {
+        if (cur.length < 2) {
+            break;
+        }
+        const a = cur[0];
+        const b = cur[cur.length - 1];
+        if (a === '"' && b === '"') {
+            try {
+                const parsed = JSON.parse(cur);
+                if (typeof parsed === 'string') {
+                    cur = parsed;
+                    continue;
+                }
+            } catch (e) {
+                const inner = cur.slice(1, -1);
+                if (inner.indexOf('"') === -1 && inner.indexOf('\\') === -1) {
+                    cur = inner;
+                    continue;
+                }
+            }
+            break;
+        }
+        if (a === '\u201c' && b === '\u201d') {
+            cur = cur.slice(1, -1);
+            continue;
+        }
+        if (a === '\u2018' && b === '\u2019') {
+            cur = cur.slice(1, -1);
+            continue;
+        }
+        break;
+    }
+    return cur;
+}
+
 function katexAvailable() {
     return typeof katex !== 'undefined' && typeof katex.renderToString === 'function';
 }
@@ -375,8 +486,8 @@ function katexAvailable() {
 function katexRender(tex, displayMode) {
     if (!katexAvailable()) {
         const s = document.createElement('span');
-        s.className = 'math-fallback';
-        s.textContent = '$' + tex + '$';
+        s.className = 'math-fallback' + (displayMode ? ' math-fallback--display' : '');
+        s.textContent = (displayMode ? '$$' : '$') + tex + (displayMode ? '$$' : '$');
         return s.outerHTML;
     }
     try {
@@ -393,128 +504,312 @@ function katexRender(tex, displayMode) {
     }
 }
 
-/**
- * 在一段「纯 Markdown」里处理行内公式：\( ... \) 与 $ ... $（单美元，不含换行）
- * 先于 marked 执行，避免 _ 在公式里被当成斜体。
- */
-function renderMdWithInlineMath(mdChunk, purify) {
-    if (!mdChunk) return '';
-    const INLINE_PAREN = /\\\(([\s\S]*?)\\\)/g;
-    const parts = [];
-    let last = 0;
-    let m;
-    while ((m = INLINE_PAREN.exec(mdChunk)) !== null) {
-        if (m.index > last) {
-            parts.push(...splitDollarInlineThenMd(mdChunk.slice(last, m.index), purify));
-        }
-        parts.push({ html: katexRender(m[1].trim(), false) });
-        last = m.index + m[0].length;
-    }
-    if (last < mdChunk.length) {
-        parts.push(...splitDollarInlineThenMd(mdChunk.slice(last), purify));
-    }
-    return parts.map(p => p.html).join('');
+/** marked 不会当 Markdown 解析的公式占位符（PUA + 词连接符，避免 emphasis 粘连） */
+function makeAssistantMathPlaceholder(id) {
+    return '\u2060\uFFF9M' + String(id) + 'M\uFFF9\u2060';
 }
 
-function splitDollarInlineThenMd(text, purify) {
-    const out = [];
-    // 允许 $ 内出现反斜杠命令（如 $\Delta H$），避免过早截断
-    const re = /\$((?:[^$\\]|\\.)+?)\$/g;
-    let last = 0;
-    let m;
-    while ((m = re.exec(text)) !== null) {
-        if (m.index > last) {
-            const raw = text.slice(last, m.index);
-            // 与行内公式拼接时不能用 marked.parse（会包 <p>，整块变换行）
-            out.push({ html: mdToSafeHtml(raw, purify, { inlineOnly: true }) });
+/** 行内 $ 的闭合位置；忽略奇数个前导反斜杠转义的 $ */
+function findClosingDollar(text, from) {
+    for (let j = from; j < text.length; j++) {
+        if (text[j] !== '$') {
+            continue;
         }
-        out.push({ html: katexRender(m[1].trim(), false) });
-        last = m.index + m[0].length;
+        let k = j - 1;
+        let bs = 0;
+        while (k >= 0 && text[k] === '\\') {
+            bs++;
+            k--;
+        }
+        if (bs % 2 === 1) {
+            continue;
+        }
+        return j;
     }
-    if (last < text.length) {
-        out.push({ html: mdToSafeHtml(text.slice(last), purify, { inlineOnly: true }) });
+    return -1;
+}
+
+/** 将「$」后内容判为公式而非价格等字面量：以 \、{ 或字母起头，或未闭合流式到文末 */
+function assistantInlineMathLooksDeliberate(afterDollar) {
+    const t = afterDollar.trimStart();
+    if (!t) {
+        return false;
     }
-    if (out.length === 0) {
-        out.push({ html: mdToSafeHtml(text, purify) });
-    }
-    return out;
+    return t.startsWith('\\') || t.startsWith('{') || /^[A-Za-z]/.test(t);
 }
 
 /**
- * @param {{ inlineOnly?: boolean }} [opts] inlineOnly：夹在 $…$ 之间的片段，须行内解析，避免 <p> 把公式顶到单独一行
+ * KaTeX MathML / 结构在 DOMPurify 中的白名单（与 renderToString 输出对齐）
  */
-function mdToSafeHtml(raw, purify, opts) {
-    if (!raw) return '';
-    const inlineOnly = !!(opts && opts.inlineOnly);
+const ASSISTANT_KATEX_PURIFY_TAGS = [
+    'math', 'semantics', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'msqrt', 'mroot',
+    'mstyle', 'mspace', 'mtext', 'menclose', 'mpadded', 'mtable', 'mtr', 'mtd', 'mlabeledtr',
+    'munder', 'mover', 'munderover', 'msubsup', 'annotation', 'none', 'line', 'ms', 'mglyph',
+    'maligngroup', 'malignmark', 'mprescripts', 'maction',
+    'svg', 'path', 'g', 'defs', 'use', 'polyline', 'polygon', 'clipPath', 'foreignObject'
+];
 
-    if (inlineOnly) {
-        if (typeof marked.parseInline === 'function') {
-            let html = marked.parseInline(raw);
-            if (html && typeof html.then === 'function') {
-                const d = document.createElement('span');
-                d.textContent = raw;
-                return d.innerHTML;
+const ASSISTANT_KATEX_PURIFY_ATTR = [
+    'class', 'style', 'id', 'title', 'xmlns', 'encoding', 'mathvariant', 'mathsize', 'mathcolor',
+    'mathbackground', 'dir', 'scriptlevel', 'displaystyle', 'stretchy', 'symmetric', 'largeop',
+    'movablelimits', 'accent', 'accentunder', 'lspace', 'rspace', 'minsize', 'maxsize',
+    'width', 'height', 'depth', 'rowspacing', 'columnspacing', 'columnalign', 'rowalign',
+    'columnlines', 'rowlines', 'frame', 'framespacing', 'equalrows', 'equalcolumns',
+    'bevelled', 'linethickness', 'numalign', 'denomalign', 'scriptminsize', 'side',
+    'alignmentscope', 'groupalign', 'href', 'xlink:href', 'viewBox', 'preserveAspectRatio',
+    'fill', 'stroke', 'stroke-width', 'd', 'x', 'y', 'x1', 'y1', 'x2', 'y2', 'transform',
+    'fill-rule', 'clip-path', 'marker-end', 'aria-hidden', 'focusable', 'xmlns:xlink', 'version'
+];
+
+function sanitizeAssistantHtml(purify, html) {
+    if (!purify || html == null) {
+        return html || '';
+    }
+    return purify.sanitize(html, {
+        ADD_TAGS: ASSISTANT_KATEX_PURIFY_TAGS,
+        ADD_ATTR: ASSISTANT_KATEX_PURIFY_ATTR,
+        ALLOW_DATA_ATTR: true
+    });
+}
+
+function countBackticksAt(text, pos) {
+    let c = 0;
+    const n = text.length;
+    while (pos + c < n && text[pos + c] === '`') {
+        c++;
+    }
+    return c;
+}
+
+function isAssistantLineStart(text, pos) {
+    if (pos === 0) {
+        return true;
+    }
+    const c = text[pos - 1];
+    return c === '\n' || c === '\r';
+}
+
+/**
+ * 在 fenced / 行内代码外扫描公式，替换为占位符；支持未闭合的 $$、\[、\(、$（流式保护）。
+ * @returns {{ md: string, mathEntries: { tex: string, display: boolean }[] }}
+ */
+function assistantPreExtractMath(text) {
+    const mathEntries = [];
+    let out = '';
+    let i = 0;
+    const n = text.length;
+    let inFence = false;
+
+    function appendMath(tex, display) {
+        mathEntries.push({ tex, display });
+        out += makeAssistantMathPlaceholder(mathEntries.length - 1);
+    }
+
+    while (i < n) {
+        if (inFence) {
+            if (isAssistantLineStart(text, i)) {
+                const bc = countBackticksAt(text, i);
+                if (bc >= 3) {
+                    out += text.slice(i, i + bc);
+                    i += bc;
+                    while (i < n && text[i] !== '\n') {
+                        out += text[i];
+                        i++;
+                    }
+                    if (i < n) {
+                        out += text[i];
+                        i++;
+                    }
+                    inFence = false;
+                    continue;
+                }
             }
-            return purify.sanitize(html);
+            out += text[i];
+            i++;
+            continue;
         }
-        let html = marked.parse(raw);
-        if (html && typeof html.then === 'function') {
-            const d = document.createElement('span');
-            d.textContent = raw;
-            return d.innerHTML;
+
+        if (isAssistantLineStart(text, i)) {
+            const bc = countBackticksAt(text, i);
+            if (bc >= 3) {
+                out += text.slice(i, i + bc);
+                i += bc;
+                while (i < n && text[i] !== '\n') {
+                    out += text[i];
+                    i++;
+                }
+                if (i < n) {
+                    out += text[i];
+                    i++;
+                }
+                inFence = true;
+                continue;
+            }
         }
-        const trimmed = String(html).trim();
-        const singleP = /^<p[^>]*>([\s\S]*)<\/p>\s*$/i.exec(trimmed);
-        if (singleP) {
-            return purify.sanitize(singleP[1]);
+
+        if (text[i] === '`') {
+            const bc = countBackticksAt(text, i);
+            if (bc === 1) {
+                out += '`';
+                i++;
+                while (i < n && text[i] !== '`' && text[i] !== '\n') {
+                    out += text[i];
+                    i++;
+                }
+                if (i < n && text[i] === '`') {
+                    out += '`';
+                    i++;
+                }
+                continue;
+            }
+            if (bc >= 3) {
+                out += text.slice(i, i + bc);
+                i += bc;
+                while (i < n && text[i] !== '\n') {
+                    out += text[i];
+                    i++;
+                }
+                if (i < n) {
+                    out += text[i];
+                    i++;
+                }
+                inFence = true;
+                continue;
+            }
+            if (bc === 2) {
+                out += '``';
+                i += 2;
+                continue;
+            }
         }
-        return purify.sanitize(trimmed);
+
+        if (text[i] === '$' && i + 1 < n && text[i + 1] === '$') {
+            const innerStart = i + 2;
+            const close = text.indexOf('$$', innerStart);
+            if (close === -1) {
+                appendMath(text.slice(innerStart), true);
+                i = n;
+            } else {
+                appendMath(text.slice(innerStart, close), true);
+                i = close + 2;
+            }
+            continue;
+        }
+
+        if (text[i] === '\\' && i + 1 < n && text[i + 1] === '[') {
+            const innerStart = i + 2;
+            const close = text.indexOf('\\]', innerStart);
+            if (close === -1) {
+                appendMath(text.slice(innerStart), true);
+                i = n;
+            } else {
+                appendMath(text.slice(innerStart, close), true);
+                i = close + 2;
+            }
+            continue;
+        }
+
+        if (text[i] === '\\' && i + 1 < n && text[i + 1] === '(') {
+            const innerStart = i + 2;
+            const close = text.indexOf('\\)', innerStart);
+            if (close === -1) {
+                appendMath(text.slice(innerStart), false);
+                i = n;
+            } else {
+                appendMath(text.slice(innerStart, close), false);
+                i = close + 2;
+            }
+            continue;
+        }
+
+        if (text[i] === '$') {
+            const after = text.slice(i + 1);
+            const closeIdx = findClosingDollar(text, i + 1);
+            const deliberate = assistantInlineMathLooksDeliberate(after);
+            if (closeIdx === -1) {
+                if (deliberate) {
+                    appendMath(after, false);
+                    i = n;
+                } else {
+                    out += '$';
+                    i++;
+                }
+                continue;
+            }
+            const inner = text.slice(i + 1, closeIdx);
+            if (!deliberate && inner.trim() === '') {
+                out += '$';
+                i++;
+                continue;
+            }
+            appendMath(inner, false);
+            i = closeIdx + 1;
+            continue;
+        }
+
+        out += text[i];
+        i++;
     }
 
-    let html = marked.parse(raw);
-    if (html && typeof html.then === 'function') {
-        const d = document.createElement('div');
-        d.textContent = raw;
-        return d.innerHTML;
+    return { md: out, mathEntries };
+}
+
+function assistantRestoreMathPlaceholders(html, mathEntries) {
+    let result = html;
+    for (let idx = 0; idx < mathEntries.length; idx++) {
+        const ph = makeAssistantMathPlaceholder(idx);
+        const { tex, display } = mathEntries[idx];
+        const piece = katexRender(tex.trim(), display);
+        const parts = result.split(ph);
+        if (parts.length > 1) {
+            result = parts.join(piece);
+        }
     }
-    return purify.sanitize(html);
+    return result;
 }
 
 /**
- * 先抽出 $$ 块级公式，再对其余部分做 Markdown + 行内公式。
- * 模型输出的 $$...$$ 是合法的；原先仅用 marked 不会渲染数学，且会破坏下划线。
+ * 修复整段被二次 JSON 编码、或含字面量 \\n 与首尾引号的助手正文（Dify/部分上游会如此返回）。
  */
-function renderMarkdownWithMath(text, purify) {
-    const DISPLAY = /\$\$([\s\S]*?)\$\$/g;
-    const segments = [];
-    let last = 0;
-    let m;
-    while ((m = DISPLAY.exec(text)) !== null) {
-        if (m.index > last) {
-            segments.push({ t: 'md', s: text.slice(last, m.index) });
+function decodeAssistantEscapedContent(raw) {
+    if (raw == null || typeof raw !== 'string') {
+        return raw;
+    }
+    let s = raw.trim().replace(/^\uFEFF/, '');
+    if (!s) {
+        return raw;
+    }
+    let cur = s;
+    for (let i = 0; i < 4; i++) {
+        if (cur.length < 2 || cur[0] !== '"' || cur[cur.length - 1] !== '"') {
+            break;
         }
-        segments.push({ t: 'math', s: m[1].trim(), display: true });
-        last = m.index + m[0].length;
-    }
-    if (last < text.length) {
-        segments.push({ t: 'md', s: text.slice(last) });
-    }
-    if (segments.length === 0) {
-        segments.push({ t: 'md', s: text });
-    }
-
-    let html = '';
-    for (const seg of segments) {
-        if (seg.t === 'math') {
-            html += katexRender(seg.s, true);
-        } else {
-            html += renderMdWithInlineMath(seg.s, purify);
+        try {
+            const parsed = JSON.parse(cur);
+            if (typeof parsed !== 'string') {
+                break;
+            }
+            cur = parsed;
+        } catch (e) {
+            break;
         }
     }
-    return html;
+    s = cur;
+    if (/\\[nrt"\\]/.test(s)) {
+        return s
+            .replace(/\\r\\n/g, '\n')
+            .replace(/\\n/g, '\n')
+            .replace(/\\r/g, '\n')
+            .replace(/\\t/g, '\t')
+            .replace(/\\"/g, '"');
+    }
+    return s;
 }
 
-/** Render assistant plain text / markdown to safe HTML */
+/**
+ * 助手消息：公式占位符 → marked.parse → KaTeX 还原 → DOMPurify（含 MathML 白名单）。
+ * 流式未闭合的 $$ / \\[ / \\( / 有意图的单 $ 整段保护，避免 _ * 进入 Markdown。
+ */
 function renderAssistantMarkdown(text) {
     if (text == null || text === '') return '';
     if (typeof text !== 'string') {
@@ -522,6 +817,7 @@ function renderAssistantMarkdown(text) {
         d.textContent = String(text);
         return d.innerHTML;
     }
+    text = decodeAssistantEscapedContent(text);
     const purify = getPurify();
     if (typeof marked === 'undefined' || typeof marked.parse !== 'function' || !purify) {
         const d = document.createElement('div');
@@ -529,17 +825,16 @@ function renderAssistantMarkdown(text) {
         return d.innerHTML;
     }
     try {
-        if (katexAvailable()) {
-            return renderMarkdownWithMath(text, purify);
-        }
-        let html = marked.parse(text);
+        const { md, mathEntries } = assistantPreExtractMath(text);
+        let html = marked.parse(md, MARKED_PARSE_OPTS);
         if (html && typeof html.then === 'function') {
             console.warn('marked returned Promise; use plain text fallback');
             const d = document.createElement('div');
             d.textContent = text;
             return d.innerHTML;
         }
-        return purify.sanitize(html);
+        html = assistantRestoreMathPlaceholders(String(html), mathEntries);
+        return sanitizeAssistantHtml(purify, html);
     } catch (e) {
         console.error('Markdown render failed:', e);
         const d = document.createElement('div');
@@ -741,53 +1036,85 @@ async function ensureSessionReady() {
     }
 }
 
-// Load conversations from backend
-async function loadConversations() {
-    try {
-        if (oauthConfigured && !authUser) {
-            const container = document.getElementById('conversationsList');
-            if (container) {
-                container.innerHTML = '';
-            }
-            renderSidebarStatus('登录后查看会话');
-            return;
-        }
-        renderSidebarStatus('');
-        const response = await fetch(`/api/conversations${conversationsQueryString()}`, {
-            credentials: 'same-origin'
-        });
-        if (!response.ok) return;
-        const data = await response.json();
-        const container = document.getElementById('conversationsList');
+let loadConversationsInFlight = null;
 
-        if (data.conversations && Object.keys(data.conversations).length > 0) {
-            container.innerHTML = '';
-            Object.entries(data.conversations).forEach(([id, conv]) => {
-                const state = getConversationState(id);
-                if (state && state.serverConversation) {
-                    state.serverConversation = {
-                        ...state.serverConversation,
-                        created_at: conv.created_at,
-                        source_id: conv.source_id || '',
-                        source_name: conv.source_name || ''
-                    };
-                }
-                container.appendChild(createConversationItem(id, conv));
-            });
-        } else {
-            container.innerHTML = '<div class="empty-state">还没有会话</div>';
-        }
-    } catch (error) {
-        console.error('Error loading conversations:', error);
+// Load conversations from backend（合并并发请求，避免短时重复打满限流）
+async function loadConversations() {
+    if (loadConversationsInFlight) {
+        return loadConversationsInFlight;
     }
+    loadConversationsInFlight = (async () => {
+        try {
+            if (oauthConfigured && !authUser) {
+                const container = document.getElementById('conversationsList');
+                if (container) {
+                    container.innerHTML = '';
+                }
+                renderSidebarStatus('登录后查看会话');
+                return;
+            }
+            renderSidebarStatus('');
+            const response = await fetch(`/api/conversations${conversationsQueryString()}`, {
+                credentials: 'same-origin'
+            });
+            if (response.status === 429) {
+                renderSidebarStatus('请求过于频繁，请稍后再试');
+                return;
+            }
+            if (!response.ok) {
+                return;
+            }
+            const data = await response.json();
+            const container = document.getElementById('conversationsList');
+
+            if (data.conversations && Object.keys(data.conversations).length > 0) {
+                container.innerHTML = '';
+                Object.entries(data.conversations).forEach(([id, conv]) => {
+                    const state = getConversationState(id);
+                    if (state && state.serverConversation) {
+                        state.serverConversation = {
+                            ...state.serverConversation,
+                            created_at: conv.created_at,
+                            source_id: conv.source_id || '',
+                            source_name: conv.source_name || ''
+                        };
+                    }
+                    container.appendChild(createConversationItem(id, conv));
+                });
+            } else {
+                container.innerHTML = '<div class="empty-state">还没有会话</div>';
+            }
+        } catch (error) {
+            console.error('Error loading conversations:', error);
+        } finally {
+            loadConversationsInFlight = null;
+        }
+    })();
+    return loadConversationsInFlight;
 }
 
 function getConversationPreview(conv) {
     const lastMessage = conv && conv.last_message;
     if (!lastMessage) return '新对话';
-    let content = lastMessage.content;
-    if (typeof content === 'object') {
-        content = (Array.isArray(content) && content[0] && content[0].text) || '图片消息';
+    const role = lastMessage.role || '';
+    let content = coerceMessageContent(lastMessage.content);
+    if (Array.isArray(content)) {
+        const textPart = content.find(item => item && item.type === 'text' && item.text);
+        content = (textPart && textPart.text) || '图片消息';
+        if (role === 'user' && typeof content === 'string') {
+            content = normalizeUserPlainTextForDisplay(content);
+        }
+    } else if (typeof content === 'object' && content !== null) {
+        content = content.text != null ? String(content.text) : '消息';
+        if (role === 'user') {
+            content = normalizeUserPlainTextForDisplay(content);
+        }
+    } else if (typeof content === 'string') {
+        content = role === 'user'
+            ? normalizeUserPlainTextForDisplay(content)
+            : decodeAssistantEscapedContent(content);
+    } else {
+        content = String(content || '');
     }
     return content.length > 40 ? content.substring(0, 40) + '...' : content;
 }
@@ -1098,6 +1425,22 @@ function tryParseJsonResponse(rawText, status) {
     }
 }
 
+/** 合并 SSE 文本片段：兼容增量与「每帧为全文前缀」的累积式上游，避免 += 造成重复。 */
+function mergeStreamChunk(current, chunk) {
+    if (chunk == null || chunk === '') {
+        return current == null ? '' : String(current);
+    }
+    const c = String(chunk);
+    const cur = current == null ? '' : String(current);
+    if (c === cur) {
+        return cur;
+    }
+    if (cur && c.startsWith(cur)) {
+        return c;
+    }
+    return cur + c;
+}
+
 async function consumeChatSse(response, conversationId, requestId) {
     const reader = response.body && response.body.getReader ? response.body.getReader() : null;
     if (!reader) {
@@ -1113,8 +1456,7 @@ async function consumeChatSse(response, conversationId, requestId) {
         rafScheduled = true;
         requestAnimationFrame(() => {
             rafScheduled = false;
-            patchPendingAssistantStream(conversationId, requestId, fullText);
-            updateStreamingAssistantBubble(conversationId, requestId, fullText);
+            applyStreamingAssistantUpdate(conversationId, requestId, fullText);
         });
     }
 
@@ -1140,8 +1482,8 @@ async function consumeChatSse(response, conversationId, requestId) {
                 } catch (e) {
                     continue;
                 }
-                if (payload.event === 'delta' && payload.text) {
-                    fullText += payload.text;
+                if (payload.event === 'delta' && payload.text != null) {
+                    fullText = mergeStreamChunk(fullText, payload.text);
                     scheduleRender();
                 } else if (payload.event === 'done') {
                     return { ok: true, data: payload, fullText };
@@ -1162,8 +1504,9 @@ async function consumeChatSse(response, conversationId, requestId) {
     return { ok: false, detail: '流结束但未收到完成事件' };
 }
 
-async function refreshConversationFromServer(conversationId) {
+async function refreshConversationFromServer(conversationId, options = {}) {
     if (!conversationId) return;
+    const skipViewRender = !!(options && options.skipViewRender);
     try {
         const response = await fetch(
             `/api/conversations/${encodeURIComponent(conversationId)}${conversationsQueryString()}`,
@@ -1178,7 +1521,9 @@ async function refreshConversationFromServer(conversationId) {
         }
         setConversationServerData(conversationId, data);
         if (currentConversationId === conversationId) {
-            renderConversationView(conversationId);
+            if (!skipViewRender) {
+                renderConversationView(conversationId);
+            }
             syncSendBtn();
             updateCurrentSourceTitle();
         }
@@ -1279,7 +1624,15 @@ async function sendMessage() {
                 const data = sse.data || {};
                 if (data.success !== false) {
                     removeLocalMessagesByRequest(activeConvId, requestId);
-                    await refreshConversationFromServer(activeConvId);
+                    await refreshConversationFromServer(activeConvId, { skipViewRender: true });
+                    const streamedBody =
+                        (typeof data.response === 'string' && data.response) ||
+                        (typeof sse.fullText === 'string' && sse.fullText) ||
+                        '';
+                    patchLastAssistantMessageContent(activeConvId, streamedBody);
+                    if (currentConversationId === activeConvId) {
+                        renderConversationView(activeConvId);
+                    }
                     if (currentConversationId === activeConvId && data.source_id) {
                         selectedSourceId = data.source_id;
                         renderSourceOptions();
@@ -1431,13 +1784,15 @@ function renderMessageBubble(bubble, role, content, options = {}) {
     bubble.innerHTML = '';
     bubble.className = 'message-bubble';
 
+    const coerced = coerceMessageContent(content);
+
     if (role === 'assistant' && !options.pending) {
         bubble.classList.add('message-bubble-md');
     }
     if (options.pending) {
-        if (role === 'assistant' && typeof content === 'string' && content.length > 0) {
+        if (role === 'assistant' && typeof coerced === 'string' && coerced.length > 0) {
             bubble.classList.add('message-bubble-md', 'message-bubble-streaming');
-            bubble.innerHTML = renderAssistantMarkdown(content);
+            bubble.innerHTML = renderAssistantMarkdown(coerced);
             return;
         }
         bubble.classList.add('message-bubble-pending');
@@ -1452,15 +1807,17 @@ function renderMessageBubble(bubble, role, content, options = {}) {
 
     // Handle content (could be string or array)
     if (role === 'user') {
-        if (typeof content === 'string') {
-            bubble.innerHTML = escapeHtml(content);
-        } else if (Array.isArray(content)) {
-            const imageItems = content.filter(item => item.type === 'image');
-            content.forEach(item => {
-                if (item.type === 'text') {
+        if (typeof coerced === 'string') {
+            bubble.innerHTML = escapeHtml(normalizeUserPlainTextForDisplay(coerced));
+        } else if (Array.isArray(coerced)) {
+            const imageItems = coerced.filter(item => item && item.type === 'image');
+            coerced.forEach(item => {
+                if (item && item.type === 'text' && item.text != null) {
                     const textBlock = document.createElement('div');
                     textBlock.className = 'md-block';
-                    textBlock.innerHTML = escapeHtml(item.text);
+                    textBlock.innerHTML = escapeHtml(
+                        normalizeUserPlainTextForDisplay(String(item.text))
+                    );
                     bubble.appendChild(textBlock);
                 }
             });
@@ -1470,21 +1827,26 @@ function renderMessageBubble(bubble, role, content, options = {}) {
                 imageItems.forEach(item => {
                     const img = document.createElement('img');
                     img.className = 'message-image message-image--thumb';
-                    img.src = item.url;
+                    img.src = item.url || '';
+                    img.alt = '';
+                    img.referrerPolicy = 'no-referrer';
                     imageGrid.appendChild(img);
                 });
                 bubble.appendChild(imageGrid);
             }
         }
     } else {
-        let assistantText = content;
-        if (content !== null && typeof content === 'object' && !Array.isArray(content)) {
-            assistantText = content.answer != null ? content.answer : (content.text != null ? content.text : JSON.stringify(content));
+        let assistantText = coerced;
+        if (coerced !== null && typeof coerced === 'object' && !Array.isArray(coerced)) {
+            assistantText = coerced.answer != null ? coerced.answer : (coerced.text != null ? coerced.text : JSON.stringify(coerced));
         }
         if (typeof assistantText === 'string') {
             bubble.innerHTML = renderAssistantMarkdown(assistantText);
-        } else if (Array.isArray(content)) {
-            content.forEach(item => {
+        } else if (Array.isArray(coerced)) {
+            coerced.forEach(item => {
+                if (!item) {
+                    return;
+                }
                 if (item.type === 'text') {
                     const block = document.createElement('div');
                     block.className = 'md-block';
@@ -1493,7 +1855,9 @@ function renderMessageBubble(bubble, role, content, options = {}) {
                 } else if (item.type === 'image') {
                     const img = document.createElement('img');
                     img.className = 'message-image';
-                    img.src = item.url;
+                    img.src = item.url || '';
+                    img.alt = '';
+                    img.referrerPolicy = 'no-referrer';
                     bubble.appendChild(img);
                 }
             });

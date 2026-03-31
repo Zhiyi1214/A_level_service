@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import io
 import logging
 import re
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlunparse
-
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -21,6 +20,7 @@ from config import settings
 log = logging.getLogger(__name__)
 
 _s3_client = None
+_s3_presign_client = None
 
 
 def allowed_file(filename: str) -> bool:
@@ -64,6 +64,32 @@ def _get_s3_client():
     return _s3_client
 
 
+def _presign_endpoint_url() -> str:
+    """预签名 URL 的 Host 须与浏览器请求一致（SigV4 含 Host）；勿先签 minio:9000 再换成 localhost。"""
+    pub = (settings.S3_BROWSER_BASE_URL or settings.S3_ENDPOINT_URL or '').strip().rstrip('/')
+    return pub
+
+
+def _get_s3_presign_client():
+    global _s3_presign_client
+    if _s3_presign_client is None and is_s3_configured():
+        endpoint = _presign_endpoint_url()
+        if not endpoint:
+            return None
+        _s3_presign_client = boto3.client(
+            's3',
+            endpoint_url=endpoint,
+            aws_access_key_id=settings.S3_ACCESS_KEY,
+            aws_secret_access_key=settings.S3_SECRET_KEY,
+            config=Config(
+                signature_version='s3v4',
+                s3={'addressing_style': 'path'},
+            ),
+            region_name=settings.S3_REGION,
+        )
+    return _s3_presign_client
+
+
 def ensure_bucket_exists() -> None:
     if not is_s3_configured():
         return
@@ -99,19 +125,14 @@ def build_object_key(user_id: str, conversation_id: str | None, filename: str) -
 
 
 def _presigned_get_url(object_key: str) -> str:
-    client = _get_s3_client()
+    client = _get_s3_presign_client()
     if not client:
         return ''
-    url = client.generate_presigned_url(
+    return client.generate_presigned_url(
         'get_object',
         Params={'Bucket': settings.S3_BUCKET, 'Key': object_key},
         ExpiresIn=settings.S3_PRESIGN_EXPIRES,
     )
-    if settings.S3_BROWSER_BASE_URL:
-        u = urlparse(url)
-        pub = urlparse(settings.S3_BROWSER_BASE_URL)
-        return urlunparse((pub.scheme, pub.netloc, u.path, u.params, u.query, u.fragment))
-    return url
 
 
 def upload_image_bytes(
@@ -258,6 +279,16 @@ def build_processed_images(
 
 def rewrite_content_image_refs(content: Any) -> Any:
     """为消息中的 object_key 刷新预签名 URL（深拷贝式改写）。"""
+    if isinstance(content, str):
+        raw = content.strip()
+        if raw.startswith('[{'):
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, list):
+                return rewrite_content_image_refs(parsed)
+        return content
     if isinstance(content, list):
         return [rewrite_content_image_refs(x) for x in content]
     if isinstance(content, dict):

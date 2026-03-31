@@ -1,10 +1,7 @@
 from config import settings
 
-if settings.USE_POSTGRES:
-    from storage.postgres import PostgresStore
+settings.validate_database_url()
 
-    store = PostgresStore(settings.DATABASE_URL)
-else:
-    from storage.sqlite import SQLiteStore
+from storage.postgres import PostgresStore
 
-    store = SQLiteStore(settings.DATABASE_PATH)
+store = PostgresStore(settings.DATABASE_URL)

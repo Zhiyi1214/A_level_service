@@ -17,6 +17,65 @@ log = logging.getLogger(__name__)
 chat_bp = Blueprint('chat', __name__)
 
 
+def _normalize_inbound_user_plaintext(text: str) -> str:
+    """请求里整段被多包一层 JSON 字符串引号时去掉（否则落库后前端会看到两侧多出的 \"）。"""
+    if not isinstance(text, str) or not text:
+        return text
+    s = text.strip()
+    if len(s) < 2 or s[0] != '"' or s[-1] != '"':
+        return text
+    try:
+        parsed = json.loads(s)
+        if isinstance(parsed, str):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    inner = s[1:-1]
+    if '"' not in inner and '\\' not in inner:
+        return inner
+    return text
+
+
+def _normalize_assistant_plaintext(text: str) -> str:
+    """上游偶发返回整段 JSON 字符串（带首尾引号与字面量 \\n）；落库前还原为普通正文。"""
+    if not isinstance(text, str) or not text:
+        return text
+    s = text.strip()
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, str):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    if '\\n' in s or '\\r' in s or '\\t' in s or '\\"' in s:
+        return (
+            s.replace('\\r\\n', '\n')
+            .replace('\\n', '\n')
+            .replace('\\r', '\n')
+            .replace('\\t', '\t')
+            .replace('\\"', '"')
+        )
+    return text
+
+
+def _accumulate_stream_chunks(parts: list[str], chunk: str) -> None:
+    """合并流式片段：兼容纯增量与「每帧为当前全文」两种上游，并忽略与当前全文相同的重复帧。"""
+    if not chunk:
+        return
+    current = ''.join(parts)
+    if chunk == current:
+        return
+    if current and chunk.startswith(current):
+        parts.clear()
+        parts.append(chunk)
+        return
+    if not parts:
+        parts.append(chunk)
+        return
+    parts.append(chunk)
+
+
 @chat_bp.route('/api/sessions', methods=['POST'])
 @limiter.limit("10 per minute")
 def create_session():
@@ -72,6 +131,10 @@ def chat():
         if not user_message:
             return jsonify({'error': 'Message cannot be empty'}), 400
 
+        user_message = _normalize_inbound_user_plaintext(user_message)
+        if not user_message:
+            return jsonify({'error': 'Message cannot be empty'}), 400
+
         if len(user_message) > settings.MAX_MESSAGE_LENGTH:
             return jsonify({
                 'error': f'Message too long (max {settings.MAX_MESSAGE_LENGTH} chars)',
@@ -121,7 +184,6 @@ def chat():
                 {'filename': p['filename'], 'mime_type': p['mime_type'], 'content': p['content']}
                 for p in processed
             ]
-            image_data = []
             for p in processed:
                 seg = {'type': 'image', 'url': p['url']}
                 obj_key = p.get('object_key')
@@ -139,6 +201,19 @@ def chat():
 
         def _sse_pack(obj: dict) -> str:
             return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+
+        def _merge_stream_meta(
+            upstream: str, mid, usg: dict, ev: dict
+        ) -> tuple[str, object, dict]:
+            c = (ev.get('conversation_id') or '').strip()
+            if c:
+                upstream = c
+            if ev.get('message_id') is not None:
+                mid = ev.get('message_id')
+            u = ev.get('usage')
+            if isinstance(u, dict) and u:
+                usg = u
+            return upstream, mid, usg
 
         @stream_with_context
         def generate():
@@ -159,26 +234,12 @@ def chat():
                     if k == 'delta':
                         t = ev.get('text') or ''
                         if t:
-                            acc.append(t)
+                            _accumulate_stream_chunks(acc, t)
                             yield _sse_pack({'event': 'delta', 'text': t})
-                    elif k == 'meta':
-                        c = (ev.get('conversation_id') or '').strip()
-                        if c:
-                            stream_upstream = c
-                        if ev.get('message_id') is not None:
-                            msg_id = ev.get('message_id')
-                        u = ev.get('usage')
-                        if isinstance(u, dict) and u:
-                            usage = u
-                    elif k == 'finished':
-                        c = (ev.get('conversation_id') or '').strip()
-                        if c:
-                            stream_upstream = c
-                        if ev.get('message_id') is not None:
-                            msg_id = ev.get('message_id')
-                        u = ev.get('usage')
-                        if isinstance(u, dict) and u:
-                            usage = u
+                    elif k in ('meta', 'finished'):
+                        stream_upstream, msg_id, usage = _merge_stream_meta(
+                            stream_upstream, msg_id, usage, ev
+                        )
                     elif k == 'error':
                         yield _sse_pack({
                             'event': 'error',
@@ -187,7 +248,7 @@ def chat():
                         })
                         return
 
-                answer_text = ''.join(acc)
+                answer_text = _normalize_assistant_plaintext(''.join(acc))
                 if stream_upstream:
                     store.update_upstream_id(conversation_id, stream_upstream)
                 if image_files:

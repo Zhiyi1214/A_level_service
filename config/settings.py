@@ -25,11 +25,11 @@ HOST = os.getenv('HOST', '0.0.0.0')
 PORT = int(os.getenv('PORT', 5000))
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 # 页脚展示用；可被 .env 覆盖。静态资源 ?v= 使用 static_asset_tag()（文件 mtime），避免只改代码却被 .env 旧值或浏览器强缓存拖死。
-FRONTEND_VERSION = os.getenv('FRONTEND_VERSION', '43')
+FRONTEND_VERSION = os.getenv('FRONTEND_VERSION', '46')
 
 
 def static_asset_tag() -> str:
-    """用于 style.css / script.js 的查询参数，随文件变更自动失效缓存。"""
+    """用于 style.css / script.js 的 ?v=：FRONTEND_VERSION + 文件 mtime，改版本或改文件都会换 URL。"""
     mtimes: list[int] = []
     for name in ('script.js', 'style.css'):
         try:
@@ -37,7 +37,8 @@ def static_asset_tag() -> str:
             mtimes.append(int(p.stat().st_mtime))
         except OSError:
             continue
-    return str(max(mtimes)) if mtimes else FRONTEND_VERSION
+    suffix = str(max(mtimes)) if mtimes else '0'
+    return f'{FRONTEND_VERSION}-{suffix}'
 
 # ---------------------------------------------------------------------------
 # CORS
@@ -86,15 +87,40 @@ S3_BROWSER_BASE_URL = (os.getenv('S3_BROWSER_BASE_URL') or '').strip().rstrip('/
 S3_PRESIGN_EXPIRES = int(os.getenv('S3_PRESIGN_EXPIRES', 604800))
 
 # ---------------------------------------------------------------------------
-# Storage
+# Storage（仅 PostgreSQL，不再支持 SQLite）
 # ---------------------------------------------------------------------------
-# 设置 DATABASE_URL（postgresql://...）时使用 PostgreSQL；否则使用本地 SQLite。
 DATABASE_URL = (os.getenv('DATABASE_URL') or '').strip()
-DATABASE_PATH = str(BASE_DIR / 'data' / 'conversations.db')
-USE_POSTGRES = bool(
-    DATABASE_URL
-    and DATABASE_URL.lower().startswith('postgresql')
-)
+
+
+def validate_database_url() -> None:
+    """启动 storage 前调用；缺少或非法时立即失败。"""
+    if not DATABASE_URL:
+        raise RuntimeError(
+            '必须设置环境变量 DATABASE_URL（postgresql://...）。本项目已移除 SQLite。'
+        )
+    lower = DATABASE_URL.lower()
+    if not (
+        lower.startswith('postgresql://')
+        or lower.startswith('postgresql+psycopg2://')
+        or lower.startswith('postgresql+psycopg://')
+    ):
+        raise RuntimeError(
+            'DATABASE_URL 须为 PostgreSQL 连接串（以 postgresql:// 等开头）。'
+        )
+
+
+def sqlalchemy_database_uri() -> str:
+    """供 Flask-SQLAlchemy 使用；统一为 psycopg2 驱动 URL。"""
+    validate_database_url()
+    d = DATABASE_URL.strip()
+    lower = d.lower()
+    if lower.startswith('postgresql+psycopg2://'):
+        return d
+    if lower.startswith('postgresql://'):
+        return 'postgresql+psycopg2://' + d[len('postgresql://') :]
+    if lower.startswith('postgresql+psycopg://'):
+        return 'postgresql+psycopg2://' + d[len('postgresql+psycopg://') :]
+    return d
 
 # ---------------------------------------------------------------------------
 # Session & Redis（多 worker / 上云时建议启用）

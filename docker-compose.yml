@@ -50,13 +50,18 @@ services:
     restart: unless-stopped
 
   ai-assistant:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: a-level-assistant:${APP_IMAGE_TAG:-46}
     container_name: ai-assistant
     env_file:
       - .env
     ports:
       - "8000:8000"
     environment:
+      FLASK_APP: app:app
+      FRONTEND_VERSION: ${FRONTEND_VERSION:-46}
       DIFY_API_URL: ${DIFY_API_URL:-http://host.docker.internal/v1}
       FLASK_ENV: ${FLASK_ENV:-production}
       HOST: 0.0.0.0

@@ -13,6 +13,7 @@ from storage import store
 # App creation
 # ---------------------------------------------------------------------------
 app = Flask(__name__, template_folder='templates', static_folder='static')
+import models  # noqa: F401 — 注册 ORM 元数据供 Flask-Migrate 使用
 app.secret_key = settings.SECRET_KEY
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=14)
 app.config['SESSION_COOKIE_HTTPONLY'] = True

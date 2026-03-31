@@ -2,11 +2,15 @@ from authlib.integrations.flask_client import OAuth
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_migrate import Migrate
+from flask_sqlalchemy import SQLAlchemy
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import settings
 
 oauth = OAuth()
+db = SQLAlchemy()
+migrate = Migrate()
 
 
 def init_session(app):
@@ -33,6 +37,16 @@ limiter = Limiter(
 
 
 def init_extensions(app):
+    app.config['SQLALCHEMY_DATABASE_URI'] = settings.sqlalchemy_database_uri()
+    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'pool_size': 10,
+        'max_overflow': 20,
+        'pool_recycle': 3600,
+        'pool_pre_ping': True,
+    }
+    db.init_app(app)
+    migrate.init_app(app, db)
     init_session(app)
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     _cors_kwargs: dict = {'origins': settings.CORS_ORIGINS}

@@ -4,6 +4,7 @@ from flask import Blueprint, jsonify, request
 
 from auth.context import effective_user_id, oauth_login_required_response
 from config import settings
+from extensions import limiter
 from services import image_service
 from storage import store
 
@@ -21,13 +22,17 @@ def _conversation_access_denied(conv):
         if conv.get('user_id') and uid != conv['user_id']:
             return jsonify({'error': 'Forbidden'}), 403
         return None
+    # 无 OAuth：须用 ?user_id= 与落库的 user_id 一致，避免仅凭 conversation_id 越权读取
     req_user = (request.args.get('user_id') or '').strip()
-    if req_user and conv.get('user_id') and req_user != conv['user_id']:
-        return jsonify({'error': 'Forbidden'}), 403
+    conv_uid = (conv.get('user_id') or '').strip()
+    if conv_uid:
+        if not req_user or req_user != conv_uid:
+            return jsonify({'error': 'Forbidden'}), 403
     return None
 
 
 @conversations_bp.route('/api/conversations', methods=['GET'])
+@limiter.limit('120 per minute')
 def get_conversations():
     try:
         user_id = effective_user_id()
@@ -56,6 +61,7 @@ def get_conversations():
 
 
 @conversations_bp.route('/api/conversations/<conversation_id>', methods=['GET'])
+@limiter.limit('120 per minute')
 def get_conversation(conversation_id):
     try:
         conv = store.get(conversation_id)
@@ -81,6 +87,7 @@ def get_conversation(conversation_id):
 
 
 @conversations_bp.route('/api/conversations/<conversation_id>', methods=['DELETE'])
+@limiter.limit('120 per minute')
 def delete_conversation(conversation_id):
     try:
         conv = store.get(conversation_id)

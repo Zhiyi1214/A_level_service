@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-# Dify 使用 POST + SSE；sseclient-py 常与 requests 搭配。此处用 httpx.iter_lines 解析
-# 「data:」行以兼容流式 POST，sseclient-py 仍列入依赖供其它只读 SSE 场景使用。
+# Dify 使用 POST + SSE；此处用 httpx.iter_lines 解析「data:」行。
 import json
 import logging
 import re
@@ -137,60 +136,6 @@ def iter_source_api_stream(
 
 
 # ======================================================================
-# Blocking API (tests / callers that need one-shot JSON)
-# ======================================================================
-
-
-def call_source_api(
-    source, message, conversation_id, user_id,
-    image_data=None, image_files=None,
-):
-    """Consume stream and return (final_dict, error) compatible with blocking clients."""
-    acc: list[str] = []
-    meta_cid = ''
-    message_id = None
-    usage: dict = {}
-    err = None
-    for ev in iter_source_api_stream(
-        source, message, conversation_id, user_id, image_data, image_files
-    ):
-        k = ev.get('kind')
-        if k == 'delta':
-            t = ev.get('text') or ''
-            if t:
-                acc.append(t)
-        elif k == 'meta':
-            cid = (ev.get('conversation_id') or '').strip()
-            if cid:
-                meta_cid = cid
-            if ev.get('message_id') is not None:
-                message_id = ev.get('message_id')
-            if isinstance(ev.get('usage'), dict):
-                usage = ev.get('usage') or {}
-        elif k == 'finished':
-            cid = (ev.get('conversation_id') or '').strip()
-            if cid:
-                meta_cid = cid
-            if ev.get('message_id') is not None:
-                message_id = ev.get('message_id')
-            if isinstance(ev.get('usage'), dict):
-                usage = ev.get('usage') or {}
-        elif k == 'error':
-            err = ev.get('message') or 'Unknown error'
-            return None, err
-    if err:
-        return None, err
-    answer = ''.join(acc)
-    body = {
-        'answer': answer,
-        'conversation_id': meta_cid,
-        'message_id': message_id,
-        'usage': usage,
-    }
-    return body, None
-
-
-# ======================================================================
 # Internal helpers
 # ======================================================================
 
@@ -318,14 +263,25 @@ def _emit_meta_from_obj(obj: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _handle_dify_sse_obj(
-    obj: dict[str, Any], *, workflow_text_acc: list[str]
+    obj: dict[str, Any],
+    *,
+    workflow_text_acc: list[str],
+    text_channel_lock: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]]:
     event = (obj.get('event') or '').strip()
 
     if event in ('message', 'agent_message'):
         ans = obj.get('answer')
         if isinstance(ans, str) and ans:
-            yield {'kind': 'delta', 'text': ans}
+            # Agent 等场景下 Dify 可能对同一段正文同时发 message 与 agent_message，拼接会翻倍
+            if text_channel_lock is not None:
+                locked = text_channel_lock.get('channel')
+                if locked is None:
+                    text_channel_lock['channel'] = event
+                elif event != locked:
+                    ans = ''
+            if ans:
+                yield {'kind': 'delta', 'text': ans}
         meta = _emit_meta_from_obj(obj)
         if meta:
             yield meta
@@ -404,6 +360,7 @@ def _stream_dify_chat(source, message, conversation_id, user_id, image_files=Non
 
     log.info("Streaming source[%s] chat: %s", source['id'], api_endpoint)
     workflow_acc: list[str] = []
+    text_channel_lock: dict[str, Any] = {'channel': None}
     meta_cid = ''
     message_id = None
     usage: dict = {}
@@ -419,7 +376,11 @@ def _stream_dify_chat(source, message, conversation_id, user_id, image_files=Non
                     }
                     return
                 for obj in _iter_sse_data_objects(response):
-                    for ev in _handle_dify_sse_obj(obj, workflow_text_acc=workflow_acc):
+                    for ev in _handle_dify_sse_obj(
+                        obj,
+                        workflow_text_acc=workflow_acc,
+                        text_channel_lock=text_channel_lock,
+                    ):
                         if ev.get('kind') == 'meta':
                             c = (ev.get('conversation_id') or '').strip()
                             if c:
@@ -457,6 +418,7 @@ def _stream_dify_workflow(source, message, user_id):
     }
     log.info("Streaming source[%s] workflow: %s", source['id'], api_endpoint)
     workflow_acc: list[str] = []
+    text_channel_lock: dict[str, Any] = {'channel': None}
     meta_cid = ''
     message_id = None
     usage: dict = {}
@@ -472,7 +434,11 @@ def _stream_dify_workflow(source, message, user_id):
                     }
                     return
                 for obj in _iter_sse_data_objects(response):
-                    for ev in _handle_dify_sse_obj(obj, workflow_text_acc=workflow_acc):
+                    for ev in _handle_dify_sse_obj(
+                        obj,
+                        workflow_text_acc=workflow_acc,
+                        text_channel_lock=text_channel_lock,
+                    ):
                         if ev.get('kind') == 'meta':
                             c = (ev.get('conversation_id') or '').strip()
                             if c:

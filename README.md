@@ -6,7 +6,7 @@
 
 - **多知识库** — 新对话前选择考试局，会话开始后自动锁定
 - **图片理解** — 上传化学结构、题目截图等，AI 同步解读
-- **对话持久化** — SQLite 存储，重启不丢失
+- **对话持久化** — PostgreSQL，多实例安全；表结构由 Flask-Migrate 管理
 - **Markdown + LaTeX** — 助手回复支持公式渲染（KaTeX）
 - **深色 / 浅色主题** — 一键切换
 - **响应式布局** — 桌面 / 平板 / 手机自适应
@@ -32,10 +32,11 @@ A_level/
 │   ├── chat_service.py     # Dify API 调用 + 响应解析
 │   ├── image_service.py    # 图片压缩、去重、上传
 │   └── source_service.py   # 知识库注册表 + 热重载
+├── models.py               # SQLAlchemy 模型
 ├── storage/
-│   ├── base.py             # ConversationStore Protocol
-│   └── sqlite.py           # SQLite 实现（WAL 模式、线程安全）
-├── data/                   # SQLite 数据库（自动创建，已 gitignore）
+│   └── postgres.py         # PostgreSQL 存储实现
+├── migrations/             # Alembic 迁移（flask db 生成，需纳入版本控制）
+├── data/                   # 可选本地目录（如上传缓存等，已 gitignore 部分条目）
 ├── static/
 │   ├── script.js
 │   ├── style.css
@@ -78,6 +79,26 @@ DIFY_API_KEY_EDX=app-xxxxxxxxxxxx
 
 知识库列表由 `config/sources.json` 控制。增删 source 后在 `.env` 中添加对应的 API key 即可，前端自动展示。
 
+**数据库**：必须提供 **`DATABASE_URL=postgresql://...`**（不再支持 SQLite）。使用 Docker Compose 时，`ai-assistant` 服务已在 `docker-compose.yml` 中注入连接串；若在本机直接执行 `python app.py`，请在 `.env` 中填写能连上的 Postgres 地址（例如 `127.0.0.1:5432`，并先在 `docker-compose.yml` 的 `postgres` 服务上暴露端口，或使用本机安装的 Postgres）。
+
+### 数据库迁移（PostgreSQL）
+
+表结构由 **Flask-Migrate（Alembic）** 管理。在首次启动或模型变更后，在项目根目录执行：
+
+```bash
+export FLASK_APP=app:app
+# 确保 DATABASE_URL 指向可访问的 Postgres（可与 .env 一致，或先 source / 加载 .env）
+
+flask db init                    # 仅首次：生成 migrations/ 与 Alembic 配置；已有 migrations/ 则跳过
+flask db migrate -m "描述本次变更"
+flask db upgrade
+```
+
+说明：
+
+- `flask db init` **只需执行一次**；仓库里若已有 `migrations/` 目录，不要重复执行。
+- 若数据库曾由旧版应用自动建表，首次 `migrate` 生成的 revision 可能与现状不一致，需人工核对差异，必要时使用 `flask db stamp head` 等策略与现有库对齐。
+
 ### Google 登录（可选）
 
 在 [Google Cloud Console](https://console.cloud.google.com/) 创建 OAuth 2.0 客户端（Web），将**已授权的重定向 URI**设为：
@@ -94,6 +115,8 @@ DIFY_API_KEY_EDX=app-xxxxxxxxxxxx
 扩展其他登录方式时，可向 `user_identities` 表写入新的 `provider` / `provider_subject`，并与当前 Session 写入同一套 `user_id`。
 
 ### 3. 启动
+
+确保 Postgres 已就绪且已执行过 **`flask db upgrade`**（或容器内等价命令），然后：
 
 ```bash
 python3 app.py
@@ -119,7 +142,13 @@ docker compose up -d --build
 | 直连后端 | http://localhost:8000 |
 | 健康检查 | http://localhost:8000/api/health |
 
-本地不用 Docker、也不设置 `DATABASE_URL` 时，仍使用 SQLite（`data/conversations.db`）；不设 `REDIS_URL` 时 Session 为签名 Cookie（单 worker 可用）。
+Compose 已为 `ai-assistant` 设置 `FLASK_APP=app:app`。将 `migrations/` 纳入版本控制并构建镜像后，可在容器内执行升级（无需再 `init` / `migrate`，除非你在改模型）：
+
+```bash
+docker compose exec ai-assistant flask db upgrade
+```
+
+不设 `REDIS_URL` 时 Session 为签名 Cookie（单 worker 可用）；生产多 worker 建议配置 Redis Session。
 
 ## API
 
@@ -176,6 +205,7 @@ curl -X POST http://localhost:5000/api/chat \
 | `MAX_MESSAGE_LENGTH` | `10000` | 单条消息字符上限 |
 | `MAX_CONVERSATIONS_PER_USER` | `50` | 每用户最大会话数（超出自动淘汰最早的） |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
+| `DATABASE_URL` | （无默认值，必填） | `postgresql://...`，应用与 `flask db` 均依赖 |
 
 ## 架构说明
 
@@ -183,15 +213,15 @@ curl -X POST http://localhost:5000/api/chat \
 Browser ──► Flask (routes/) ──► services/ ──► Dify API
                                    │
                                    ▼
-                              storage/sqlite
+                         storage/postgres + SQLAlchemy
                                    │
                                    ▼
-                              data/*.db
+                            PostgreSQL
 ```
 
 - **routes/** 只做 HTTP 协议转换（参数校验、状态码）
 - **services/** 包含全部业务逻辑（Dify 调用、图片压缩、知识库管理）
-- **storage/** 数据持久化，通过 Protocol 定义接口，当前为 SQLite 实现，可替换为 PostgreSQL / Redis
+- **storage/** 数据持久化，通过 Protocol 定义接口；实现为 **PostgreSQL（ORM）**
 
 `sources.json` 支持运行时热重载：宿主机修改文件后，下一个请求自动生效，无需重启。
 
