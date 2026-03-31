@@ -49,8 +49,18 @@ def static_asset_tag() -> str:
 # ---------------------------------------------------------------------------
 # CORS
 # ---------------------------------------------------------------------------
-_cors_raw = os.getenv('CORS_ORIGINS', '*')
-CORS_ORIGINS = [o.strip() for o in _cors_raw.split(',') if o.strip()] or ['*']
+# 开发未设置时允许 *；生产默认空列表（仅同源，不放宽 ACAO），避免 * 与自定义头 CSRF 缓解被跨域脚本滥用。
+_cors_env = os.getenv('CORS_ORIGINS')
+if _cors_env is None:
+    CORS_ORIGINS = ['*'] if FLASK_ENV == 'development' else []
+else:
+    CORS_ORIGINS = [o.strip() for o in _cors_env.split(',') if o.strip()]
+
+if FLASK_ENV == 'production' and len(CORS_ORIGINS) == 1 and CORS_ORIGINS[0] == '*':
+    raise RuntimeError(
+        '生产环境 CORS_ORIGINS 不能为 *（跨域站点可带 X-Requested-With 发起请求，削弱 CSRF 缓解）。'
+        '请改为逗号分隔的明确源（如 https://app.example.com），或与前端同源部署时将 CORS_ORIGINS 留空。'
+    )
 
 # ---------------------------------------------------------------------------
 # Rate limiter

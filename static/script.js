@@ -3,7 +3,6 @@ let currentConversationId = null;
 let uploadedFiles = [];
 let oauthConfigured = false;
 let authUser = null;
-const anonymousUserId = 'user_' + Math.random().toString(36).slice(2, 11);
 let lastEnterDownMs = 0;
 let sendBtnDefaultHtml = '';
 let availableSources = [];
@@ -60,20 +59,10 @@ function getCurrentPendingCount() {
     return state ? state.pendingCount : 0;
 }
 
-function conversationsQueryString() {
-    if (oauthConfigured) {
-        return '';
-    }
-    return `?user_id=${encodeURIComponent(anonymousUserId)}`;
-}
-
-/** 单条会话 API（支持 message_limit / before_message_id 分页） */
+/** 单条会话 API（支持 message_limit / before_message_id 分页）；匿名身份由服务端 Cookie session 绑定，勿传 user_id */
 function conversationDetailUrl(conversationId, query = {}) {
     const base = `/api/conversations/${encodeURIComponent(conversationId)}`;
     const params = new URLSearchParams();
-    if (!oauthConfigured && anonymousUserId) {
-        params.set('user_id', anonymousUserId);
-    }
     if (query.messageLimit != null) {
         params.set('message_limit', String(query.messageLimit));
     }
@@ -1171,9 +1160,6 @@ async function ensureSessionReady() {
     }
     try {
         const payload = { source_id: selectedSourceId };
-        if (!oauthConfigured) {
-            payload.user_id = anonymousUserId;
-        }
         const response = await fetch('/api/sessions', withAjaxHeaders({
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1259,7 +1245,7 @@ async function loadConversations() {
                 return;
             }
             renderSidebarStatus('');
-            const response = await fetch(`/api/conversations${conversationsQueryString()}`, {
+            const response = await fetch('/api/conversations', {
                 credentials: 'same-origin'
             });
             if (response.status === 429) {
@@ -1684,9 +1670,6 @@ async function postChatMessage({ message, files, controller, conversationId, sou
     const formData = new FormData();
     formData.append('message', message);
     formData.append('conversation_id', conversationId || '');
-    if (!oauthConfigured) {
-        formData.append('user_id', anonymousUserId);
-    }
     formData.append('source_id', sourceId || '');
 
     (files || []).forEach(file => {

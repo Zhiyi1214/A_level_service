@@ -149,17 +149,17 @@ def chat():
                 'detail': 'Please create a session via POST /api/sessions before chatting.',
             }), 400
 
-        session = store.get(conversation_id)
-        if not session:
+        conv = store.get(conversation_id)
+        if not conv:
             return jsonify({
                 'error': 'Conversation not found',
                 'detail': 'Session expired or invalid conversation_id.',
             }), 404
 
-        if settings.OAUTH_CONFIGURED and session.get('user_id') != user_id:
+        if conv.get('user_id') != user_id:
             return jsonify({'error': 'Forbidden', 'detail': 'Not your conversation.'}), 403
 
-        locked_source_id = session['source_id']
+        locked_source_id = conv['source_id']
 
         if source_id and source_id != locked_source_id:
             return jsonify({
@@ -221,7 +221,7 @@ def chat():
 
         # ----- stream upstream (SSE) -----
         # Dify：每轮请求只带本轮 multipart；同会话同图 sha256 命中 Postgres 缓存则复用 upload_file_id
-        upstream_cid = (session.get('upstream_conversation_id') or '').strip()
+        upstream_cid = (conv.get('upstream_conversation_id') or '').strip()
 
         def _sse_pack(obj: dict) -> str:
             return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"

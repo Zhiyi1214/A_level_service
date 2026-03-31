@@ -9,7 +9,6 @@ import re
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -65,15 +64,11 @@ def _get_s3_client():
 
 
 def gated_public_media_url(object_key: str, *, viewer_user_id: str | None) -> str:
-    """同源受控下载地址（经 /api/media 校验属主）；非 OAuth 时依赖 ?user_id= 与 object_key 前缀一致。"""
+    """同源受控下载地址（经 /api/media 据会话 Cookie 校验属主）。viewer_user_id 保留参数供调用方一致，URL 不再带 user_id。"""
     key = (object_key or '').strip()
     if not key:
         return ''
-    path = f'/api/media/{key}'
-    if settings.OAUTH_CONFIGURED:
-        return path
-    uid = (viewer_user_id or '').strip() or 'default_user'
-    return f'{path}?user_id={quote(uid, safe="")}'
+    return f'/api/media/{key}'
 
 
 def presigned_get_url_internal(object_key: str, *, expires_seconds: int | None = None) -> str:

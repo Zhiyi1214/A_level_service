@@ -46,16 +46,18 @@ def init_extensions(app):
     db.init_app(app)
     migrate.init_app(app, db)
     init_session(app)
-    _cors_kwargs: dict = {
-        'origins': settings.CORS_ORIGINS,
-        'allow_headers': ['Content-Type', 'Authorization', 'X-Requested-With'],
-    }
-    # 带 Cookie 的跨域请求不能与 origins=* 同时使用
-    if settings.OAUTH_CONFIGURED and not (
-        len(settings.CORS_ORIGINS) == 1 and settings.CORS_ORIGINS[0] == '*'
-    ):
-        _cors_kwargs['supports_credentials'] = True
-    CORS(app, **_cors_kwargs)
+    _cors_has_wildcard = any(o == '*' for o in settings.CORS_ORIGINS)
+    if settings.CORS_ORIGINS:
+        _cors_kwargs: dict = {
+            'origins': settings.CORS_ORIGINS,
+            'allow_headers': ['Content-Type', 'Authorization', 'X-Requested-With'],
+        }
+        # 带 Cookie 的跨域请求不能与 origins=* 同时使用；且 * 时勿与自定义头 CSRF 缓解假定为安全组合
+        if settings.OAUTH_CONFIGURED and not _cors_has_wildcard:
+            _cors_kwargs['supports_credentials'] = True
+        if _cors_has_wildcard and _cors_kwargs.get('supports_credentials'):
+            raise RuntimeError('CORS origins 含 * 时不应启用 supports_credentials')
+        CORS(app, **_cors_kwargs)
     limiter.init_app(app)
     if settings.OAUTH_CONFIGURED:
         oauth.init_app(app)
