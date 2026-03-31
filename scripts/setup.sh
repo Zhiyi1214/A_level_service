@@ -41,9 +41,6 @@ if [ ! -f ".env" ]; then
     echo "✓ .env file created (please update with your API key)"
 fi
 
-# 创建uploads目录
-mkdir -p uploads
-
 echo ""
 echo "✅ Setup complete!"
 echo ""

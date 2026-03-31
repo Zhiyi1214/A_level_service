@@ -4,6 +4,7 @@ from flask import Blueprint, jsonify, request
 
 from auth.context import effective_user_id, oauth_login_required_response
 from config import settings
+from services import image_service
 from storage import store
 
 log = logging.getLogger(__name__)
@@ -32,9 +33,22 @@ def get_conversations():
         user_id = effective_user_id()
         if settings.OAUTH_CONFIGURED and not user_id:
             return oauth_login_required_response()
+        raw = store.list_by_user(user_id)
+        hydrated = {}
+        for cid, summary in raw.items():
+            if not isinstance(summary, dict):
+                hydrated[cid] = summary
+                continue
+            s = dict(summary)
+            lm = s.get('last_message')
+            if isinstance(lm, dict):
+                lm = dict(lm)
+                lm['content'] = image_service.rewrite_content_image_refs(lm.get('content'))
+                s['last_message'] = lm
+            hydrated[cid] = s
         return jsonify({
             'success': True,
-            'conversations': store.list_by_user(user_id),
+            'conversations': hydrated,
         }), 200
     except Exception:
         log.exception("get_conversations failed")
@@ -52,11 +66,12 @@ def get_conversation(conversation_id):
         if denied:
             return denied
 
+        messages = image_service.hydrate_messages_for_client(conv['messages'])
         return jsonify({
             'success': True,
             'id': conversation_id,
             'created_at': conv['created_at'],
-            'messages': conv['messages'],
+            'messages': messages,
             'source_id': conv.get('source_id', ''),
             'source_name': conv.get('source_name', ''),
         }), 200

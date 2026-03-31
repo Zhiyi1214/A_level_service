@@ -1,12 +1,11 @@
 import logging
 from datetime import datetime, timedelta
-from pathlib import Path
 
-from flask import Flask, jsonify, render_template, send_from_directory
-from werkzeug.utils import secure_filename
+from flask import Flask, jsonify, make_response, render_template
 
 from config import settings
 from extensions import init_extensions, limiter
+from services import image_service
 from services.source_service import source_service
 from storage import store
 
@@ -20,12 +19,11 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = settings.SESSION_COOKIE_SECURE
 app.config['MAX_CONTENT_LENGTH'] = settings.MAX_CONTENT_LENGTH
-app.config['UPLOAD_FOLDER'] = settings.UPLOAD_FOLDER
 
 logging.basicConfig(level=settings.LOG_LEVEL)
 log = app.logger
 
-Path(settings.UPLOAD_FOLDER).mkdir(parents=True, exist_ok=True)
+image_service.ensure_bucket_exists()
 
 init_extensions(app)
 
@@ -65,7 +63,15 @@ def _security_headers(response):
 
 @app.route('/')
 def index():
-    return render_template('index.html', frontend_version=settings.FRONTEND_VERSION)
+    html = render_template(
+        'index.html',
+        frontend_version=settings.FRONTEND_VERSION,
+        asset_tag=settings.static_asset_tag(),
+    )
+    resp = make_response(html)
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    return resp
 
 
 @app.route('/api/health', methods=['GET'])
@@ -84,13 +90,6 @@ def health_check():
         'configured_sources': configured_count,
     }), 200
 
-
-@app.route('/uploads/<filename>')
-def download_file(filename):
-    safe_name = secure_filename(filename)
-    if not safe_name or safe_name != filename:
-        return jsonify({'error': 'Invalid filename'}), 400
-    return send_from_directory(app.config['UPLOAD_FOLDER'], safe_name)
 
 # ---------------------------------------------------------------------------
 # Error handlers

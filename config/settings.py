@@ -24,7 +24,20 @@ FLASK_ENV = os.getenv('FLASK_ENV', 'production')
 HOST = os.getenv('HOST', '0.0.0.0')
 PORT = int(os.getenv('PORT', 5000))
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-FRONTEND_VERSION = os.getenv('FRONTEND_VERSION', '41')
+# 页脚展示用；可被 .env 覆盖。静态资源 ?v= 使用 static_asset_tag()（文件 mtime），避免只改代码却被 .env 旧值或浏览器强缓存拖死。
+FRONTEND_VERSION = os.getenv('FRONTEND_VERSION', '43')
+
+
+def static_asset_tag() -> str:
+    """用于 style.css / script.js 的查询参数，随文件变更自动失效缓存。"""
+    mtimes: list[int] = []
+    for name in ('script.js', 'style.css'):
+        try:
+            p = BASE_DIR / 'static' / name
+            mtimes.append(int(p.stat().st_mtime))
+        except OSError:
+            continue
+    return str(max(mtimes)) if mtimes else FRONTEND_VERSION
 
 # ---------------------------------------------------------------------------
 # CORS
@@ -41,9 +54,6 @@ RATELIMIT_STORAGE_URI = os.getenv('RATELIMIT_STORAGE_URI', 'memory://')
 # File upload
 # ---------------------------------------------------------------------------
 MAX_CONTENT_LENGTH = int(os.getenv('MAX_CONTENT_LENGTH', 52428800))
-
-_upload_folder = os.getenv('UPLOAD_FOLDER', './uploads')
-UPLOAD_FOLDER = str(BASE_DIR / _upload_folder) if not os.path.isabs(_upload_folder) else _upload_folder
 
 ALLOWED_EXTENSIONS = set(
     os.getenv('ALLOWED_EXTENSIONS', 'jpg,jpeg,png,gif,webp,pdf,txt,doc,docx').split(',')
@@ -62,6 +72,18 @@ MAX_UPSTREAM_IMAGES = int(os.getenv('MAX_UPSTREAM_IMAGES', 3))
 MAX_IMAGE_SIDE = int(os.getenv('MAX_IMAGE_SIDE', 1600))
 IMAGE_JPEG_QUALITY = int(os.getenv('IMAGE_JPEG_QUALITY', 82))
 MAX_COMPRESSED_IMAGE_BYTES = int(os.getenv('MAX_COMPRESSED_IMAGE_BYTES', 1_500_000))
+
+# ---------------------------------------------------------------------------
+# S3 / MinIO（对象存储；未配置时图片回退为 data URL）
+# ---------------------------------------------------------------------------
+S3_ENDPOINT_URL = (os.getenv('S3_ENDPOINT_URL') or '').strip().rstrip('/')
+S3_ACCESS_KEY = (os.getenv('S3_ACCESS_KEY') or '').strip()
+S3_SECRET_KEY = (os.getenv('S3_SECRET_KEY') or '').strip()
+S3_BUCKET = (os.getenv('S3_BUCKET') or 'a-level-uploads').strip()
+S3_REGION = (os.getenv('S3_REGION') or 'us-east-1').strip()
+# 浏览器访问预签名 URL 时使用的主机（例如 http://localhost:9000）；留空则使用 boto 生成的原始地址
+S3_BROWSER_BASE_URL = (os.getenv('S3_BROWSER_BASE_URL') or '').strip().rstrip('/')
+S3_PRESIGN_EXPIRES = int(os.getenv('S3_PRESIGN_EXPIRES', 604800))
 
 # ---------------------------------------------------------------------------
 # Storage

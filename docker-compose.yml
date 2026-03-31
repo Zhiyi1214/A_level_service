@@ -33,6 +33,22 @@ services:
       - ai-network
     restart: unless-stopped
 
+  minio:
+    image: minio/minio:latest
+    container_name: ai-assistant-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_change_me}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    networks:
+      - ai-network
+    restart: unless-stopped
+
   ai-assistant:
     build: .
     container_name: ai-assistant
@@ -48,15 +64,21 @@ services:
       DATABASE_URL: postgresql://a_level:${POSTGRES_PASSWORD:-a_level_dev_change_me}@postgres:5432/a_level
       REDIS_URL: redis://redis:6379/0
       RATELIMIT_STORAGE_URI: redis://redis:6379/1
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin_change_me}
+      S3_BUCKET: ${S3_BUCKET:-a-level-uploads}
+      S3_BROWSER_BASE_URL: ${S3_BROWSER_BASE_URL:-http://localhost:9000}
     volumes:
       - .:/app
-      - ./uploads:/app/uploads
       - ./data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_started
     networks:
       - ai-network
     restart: unless-stopped
@@ -86,6 +108,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+  miniodata:
 
 networks:
   ai-network:

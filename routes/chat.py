@@ -1,8 +1,9 @@
+import json
 import logging
 import uuid
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from auth.context import effective_user_id, oauth_login_required_response
 from config import settings
@@ -112,59 +113,108 @@ def chat():
         image_files: list[dict] = []
         if 'files' in request.files:
             processed = image_service.build_processed_images(
-                request.files.getlist('files')
+                request.files.getlist('files'),
+                user_id=user_id,
+                conversation_id=conversation_id,
             )
             image_files = [
                 {'filename': p['filename'], 'mime_type': p['mime_type'], 'content': p['content']}
                 for p in processed
             ]
-            image_data = [{'type': 'image', 'url': p['data_url']} for p in processed]
+            image_data = []
+            for p in processed:
+                seg = {'type': 'image', 'url': p['url']}
+                obj_key = p.get('object_key')
+                if obj_key:
+                    seg['object_key'] = obj_key
+                image_data.append(seg)
 
         message_content = user_message
         if image_data:
             message_content = [{'type': 'text', 'text': user_message}] + image_data
 
-        # ----- call upstream -----
+        # ----- stream upstream (SSE) -----
         active_image_files = image_files or store.get_image_cache(conversation_id)
-        upstream_cid = session.get('upstream_conversation_id', '')
+        upstream_cid = (session.get('upstream_conversation_id') or '').strip()
 
-        response_data, upstream_error = chat_service.call_source_api(
-            source=source,
-            message=user_message,
-            conversation_id=upstream_cid,
-            user_id=user_id,
-            image_data=image_data,
-            image_files=active_image_files,
-        )
+        def _sse_pack(obj: dict) -> str:
+            return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
-        if response_data is None:
-            return jsonify({
-                'error': 'Failed to get response from upstream API',
-                'detail': upstream_error or 'Unknown error',
-                'source_id': locked_source_id,
-            }), 502
+        @stream_with_context
+        def generate():
+            acc: list[str] = []
+            stream_upstream = upstream_cid
+            msg_id = None
+            usage: dict = {}
+            try:
+                for ev in chat_service.iter_source_api_stream(
+                    source=source,
+                    message=user_message,
+                    conversation_id=upstream_cid,
+                    user_id=user_id,
+                    image_data=image_data,
+                    image_files=active_image_files,
+                ):
+                    k = ev.get('kind')
+                    if k == 'delta':
+                        t = ev.get('text') or ''
+                        if t:
+                            acc.append(t)
+                            yield _sse_pack({'event': 'delta', 'text': t})
+                    elif k == 'meta':
+                        c = (ev.get('conversation_id') or '').strip()
+                        if c:
+                            stream_upstream = c
+                        if ev.get('message_id') is not None:
+                            msg_id = ev.get('message_id')
+                        u = ev.get('usage')
+                        if isinstance(u, dict) and u:
+                            usage = u
+                    elif k == 'finished':
+                        c = (ev.get('conversation_id') or '').strip()
+                        if c:
+                            stream_upstream = c
+                        if ev.get('message_id') is not None:
+                            msg_id = ev.get('message_id')
+                        u = ev.get('usage')
+                        if isinstance(u, dict) and u:
+                            usage = u
+                    elif k == 'error':
+                        yield _sse_pack({
+                            'event': 'error',
+                            'detail': ev.get('message') or 'Unknown error',
+                            'source_id': locked_source_id,
+                        })
+                        return
 
-        # ----- persist state -----
-        maybe_cid = chat_service.extract_conversation_id(response_data)
-        if maybe_cid:
-            store.update_upstream_id(conversation_id, maybe_cid)
-        if image_files:
-            store.set_image_cache(conversation_id, image_files)
+                answer_text = ''.join(acc)
+                if stream_upstream:
+                    store.update_upstream_id(conversation_id, stream_upstream)
+                if image_files:
+                    store.set_image_cache(conversation_id, image_files)
 
-        now = datetime.now().isoformat()
-        store.append_message(conversation_id, 'user', message_content, now)
-        answer_text = chat_service.extract_answer(response_data)
-        store.append_message(conversation_id, 'assistant', answer_text, now)
+                now = datetime.now().isoformat()
+                store.append_message(conversation_id, 'user', message_content, now)
+                store.append_message(conversation_id, 'assistant', answer_text, now)
 
-        return jsonify({
-            'success': True,
-            'conversation_id': conversation_id,
-            'response': answer_text,
-            'message_id': response_data.get('message_id'),
-            'usage': response_data.get('usage', {}),
-            'source_id': locked_source_id,
-            'source_name': source.get('name', locked_source_id),
-        }), 200
+                yield _sse_pack({
+                    'event': 'done',
+                    'success': True,
+                    'conversation_id': conversation_id,
+                    'response': answer_text,
+                    'message_id': msg_id,
+                    'usage': usage,
+                    'source_id': locked_source_id,
+                    'source_name': source.get('name', locked_source_id),
+                })
+            except Exception:
+                log.exception("chat stream failed")
+                yield _sse_pack({'event': 'error', 'detail': 'Internal server error'})
+
+        resp = Response(generate(), mimetype='text/event-stream')
+        resp.headers['Cache-Control'] = 'no-cache'
+        resp.headers['X-Accel-Buffering'] = 'no'
+        return resp
     except Exception:
         log.exception("chat failed")
         return jsonify({'error': 'Internal server error'}), 500

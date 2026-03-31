@@ -227,6 +227,44 @@ function replacePendingAssistantMessage(conversationId, requestId, content) {
     });
 }
 
+function patchPendingAssistantStream(conversationId, requestId, content) {
+    const state = getConversationState(conversationId);
+    if (!state) return;
+    state.localMessages = state.localMessages.map(msg => {
+        if (msg.requestId === requestId && msg.role === 'assistant' && msg.pending) {
+            return { ...msg, content, pending: true };
+        }
+        return msg;
+    });
+}
+
+/** 仅更新流式生成中的助手气泡，避免 renderConversationView 清空整页导致闪烁 */
+function updateStreamingAssistantBubble(conversationId, requestId, fullText) {
+    if (currentConversationId !== conversationId || !requestId) {
+        return;
+    }
+    const messagesArea = document.getElementById('messagesArea');
+    if (!messagesArea) {
+        return;
+    }
+    let row = null;
+    messagesArea.querySelectorAll('.message.assistant.message-pending').forEach((el) => {
+        if (el.dataset.requestId === requestId) {
+            row = el;
+        }
+    });
+    if (!row) {
+        return;
+    }
+    const bubble = row.querySelector('.message-bubble');
+    if (!bubble) {
+        return;
+    }
+    bubble.className = 'message-bubble message-bubble-md message-bubble-streaming';
+    bubble.innerHTML = renderAssistantMarkdown(fullText);
+    scrollMessagesToBottom();
+}
+
 function getConversationMessagesForView(conversationId) {
     const state = getConversationState(conversationId);
     if (!state) return [];
@@ -246,7 +284,10 @@ function renderConversationView(conversationId) {
         return;
     }
     messages.forEach(msg => {
-        addMessageToUI(msg.role, msg.content, { pending: !!msg.pending });
+        addMessageToUI(msg.role, msg.content, {
+            pending: !!msg.pending,
+            requestId: msg.requestId || undefined
+        });
     });
     scrollMessagesToBottom();
 }
@@ -1057,6 +1098,70 @@ function tryParseJsonResponse(rawText, status) {
     }
 }
 
+async function consumeChatSse(response, conversationId, requestId) {
+    const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+    if (!reader) {
+        return { ok: false, detail: '浏览器不支持流式读取' };
+    }
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullText = '';
+    let rafScheduled = false;
+
+    function scheduleRender() {
+        if (rafScheduled) return;
+        rafScheduled = true;
+        requestAnimationFrame(() => {
+            rafScheduled = false;
+            patchPendingAssistantStream(conversationId, requestId, fullText);
+            updateStreamingAssistantBubble(conversationId, requestId, fullText);
+        });
+    }
+
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+                break;
+            }
+            buffer += decoder.decode(value, { stream: true });
+            let sep;
+            while ((sep = buffer.indexOf('\n\n')) >= 0) {
+                const block = buffer.slice(0, sep);
+                buffer = buffer.slice(sep + 2);
+                const lines = block.split('\n');
+                const dataLine = lines.find(line => line.startsWith('data: '));
+                if (!dataLine) {
+                    continue;
+                }
+                let payload;
+                try {
+                    payload = JSON.parse(dataLine.slice(6).trim());
+                } catch (e) {
+                    continue;
+                }
+                if (payload.event === 'delta' && payload.text) {
+                    fullText += payload.text;
+                    scheduleRender();
+                } else if (payload.event === 'done') {
+                    return { ok: true, data: payload, fullText };
+                } else if (payload.event === 'error') {
+                    return {
+                        ok: false,
+                        detail: payload.detail || 'Unknown error'
+                    };
+                }
+            }
+        }
+    } catch (e) {
+        if (e && e.name === 'AbortError') {
+            return { ok: false, detail: 'aborted', aborted: true };
+        }
+        return { ok: false, detail: (e && e.message) ? e.message : String(e) };
+    }
+    return { ok: false, detail: '流结束但未收到完成事件' };
+}
+
 async function refreshConversationFromServer(conversationId) {
     if (!conversationId) return;
     try {
@@ -1113,7 +1218,7 @@ async function sendMessage() {
     const userMessageContent = buildUserMessageContent(message, filesToSend);
     addLocalMessages(requestConversationId, [
         { requestId, role: 'user', content: userMessageContent, pending: false },
-        { requestId, role: 'assistant', content: '正在生成回复...', pending: true }
+        { requestId, role: 'assistant', content: '', pending: true }
     ]);
     if (currentConversationId === requestConversationId) {
         renderConversationView(requestConversationId);
@@ -1130,38 +1235,121 @@ async function sendMessage() {
     syncSendBtn();
 
     try {
+        let activeConvId = requestConversationId;
         let response = await postChatMessage({
             message: outboundMessage,
             files: filesToSend,
             controller: requestController,
-            conversationId: requestConversationId,
+            conversationId: activeConvId,
             sourceId: requestSourceId
         });
 
-        let rawText = await response.text();
-        let parsed = tryParseJsonResponse(rawText, response.status);
-        if (!parsed.ok) {
-            failPendingMessage(requestConversationId, requestId, parsed.errorMessage);
-            return;
+        async function handleErrorResponse(res, data, parsedOk) {
+            if (
+                res.status === 404
+                && data
+                && data.detail === 'Session expired or invalid conversation_id.'
+            ) {
+                return { renew: true };
+            }
+            if (!parsedOk) {
+                failPendingMessage(activeConvId, requestId, data.errorMessage || 'Invalid response');
+                return { done: true };
+            }
+            const detail = data.detail || data.error || '';
+            const errorMsg = (res.status === 409 && data.error === 'source_locked')
+                ? '❌ 当前会话已锁定知识库，不能中途切换。请新建对话后再切换。'
+                : '❌ Error: HTTP ' + res.status + (detail ? ' — ' + detail : '');
+            failPendingMessage(activeConvId, requestId, errorMsg);
+            return { done: true };
         }
-        let data = parsed.data;
 
-        if (response.status === 404 && data && data.detail === 'Session expired or invalid conversation_id.') {
-            if (currentConversationId !== requestConversationId) {
-                failPendingMessage(requestConversationId, requestId, '❌ 当前会话已失效，请回到该会话后重试。');
+        async function handleOkResponse(res) {
+            const ct = (res.headers.get('Content-Type') || '').toLowerCase();
+            if (ct.includes('text/event-stream')) {
+                const sse = await consumeChatSse(res, activeConvId, requestId);
+                if (sse.aborted) {
+                    failPendingMessage(activeConvId, requestId, '已停止生成。');
+                    return;
+                }
+                if (!sse.ok) {
+                    failPendingMessage(activeConvId, requestId, '❌ Error: ' + (sse.detail || ''));
+                    return;
+                }
+                const data = sse.data || {};
+                if (data.success !== false) {
+                    removeLocalMessagesByRequest(activeConvId, requestId);
+                    await refreshConversationFromServer(activeConvId);
+                    if (currentConversationId === activeConvId && data.source_id) {
+                        selectedSourceId = data.source_id;
+                        renderSourceOptions();
+                        setSourceLocked(true);
+                    }
+                    loadConversations();
+                    updateActiveConversation();
+                    updateCurrentSourceTitle();
+                } else {
+                    const detail = data.detail ? ` (${data.detail})` : '';
+                    failPendingMessage(
+                        activeConvId,
+                        requestId,
+                        '❌ Error: ' + (data.error || 'Failed to get response') + detail
+                    );
+                }
                 return;
             }
-            currentConversationId = null;
-            setSourceLocked(false);
+            const rawText = await res.text();
+            const parsed = tryParseJsonResponse(rawText, res.status);
+            if (!parsed.ok) {
+                failPendingMessage(activeConvId, requestId, parsed.errorMessage);
+                return;
+            }
+            const data = parsed.data;
+            if (data.success !== false) {
+                removeLocalMessagesByRequest(activeConvId, requestId);
+                await refreshConversationFromServer(activeConvId);
+                if (currentConversationId === activeConvId && data.source_id) {
+                    selectedSourceId = data.source_id;
+                    renderSourceOptions();
+                    setSourceLocked(true);
+                }
+                loadConversations();
+                updateActiveConversation();
+                updateCurrentSourceTitle();
+            } else {
+                const detail = data.detail ? ` (${data.detail})` : '';
+                failPendingMessage(
+                    activeConvId,
+                    requestId,
+                    '❌ Error: ' + (data.error || 'Failed to get response') + detail
+                );
+            }
+        }
 
-            const renewedSession = await ensureSessionReady();
-            if (renewedSession) {
+        if (!response.ok) {
+            const rawText = await response.text();
+            const parsed = tryParseJsonResponse(rawText, response.status);
+            const data = parsed.ok ? parsed.data : parsed;
+            const err = await handleErrorResponse(response, data, parsed.ok);
+            if (err && err.renew) {
+                if (currentConversationId !== requestConversationId) {
+                    failPendingMessage(requestConversationId, requestId, '❌ 当前会话已失效，请回到该会话后重试。');
+                    return;
+                }
+                currentConversationId = null;
+                setSourceLocked(false);
+                const renewedSession = await ensureSessionReady();
+                if (!renewedSession) {
+                    failPendingMessage(requestConversationId, requestId, '❌ 无法续会话，请重试。');
+                    return;
+                }
                 const renewedConversationId = currentConversationId;
                 if (renewedConversationId && renewedConversationId !== requestConversationId) {
                     removeLocalMessagesByRequest(requestConversationId, requestId);
+                    activeConvId = renewedConversationId;
                     addLocalMessages(renewedConversationId, [
                         { requestId, role: 'user', content: userMessageContent, pending: false },
-                        { requestId, role: 'assistant', content: '正在生成回复...', pending: true }
+                        { requestId, role: 'assistant', content: '', pending: true }
                     ]);
                     if (currentConversationId === renewedConversationId) {
                         renderConversationView(renewedConversationId);
@@ -1171,43 +1359,23 @@ async function sendMessage() {
                     message: outboundMessage,
                     files: filesToSend,
                     controller: requestController,
-                    conversationId: renewedConversationId || requestConversationId,
+                    conversationId: activeConvId,
                     sourceId: requestSourceId
                 });
-                rawText = await response.text();
-                parsed = tryParseJsonResponse(rawText, response.status);
-                if (!parsed.ok) {
-                    failPendingMessage(requestConversationId, requestId, parsed.errorMessage);
+                if (!response.ok) {
+                    const raw2 = await response.text();
+                    const parsed2 = tryParseJsonResponse(raw2, response.status);
+                    const data2 = parsed2.ok ? parsed2.data : parsed2;
+                    await handleErrorResponse(response, data2, parsed2.ok);
                     return;
                 }
-                data = parsed.data;
+                await handleOkResponse(response);
+                return;
             }
-        }
-
-        if (!response.ok) {
-            const detail = data.detail || data.error || '';
-            const errorMsg = (response.status === 409 && data.error === 'source_locked')
-                ? '❌ 当前会话已锁定知识库，不能中途切换。请新建对话后再切换。'
-                : '❌ Error: HTTP ' + response.status + (detail ? ' — ' + detail : '');
-            failPendingMessage(requestConversationId, requestId, errorMsg);
             return;
         }
 
-        if (data.success !== false) {
-            removeLocalMessagesByRequest(requestConversationId, requestId);
-            await refreshConversationFromServer(requestConversationId);
-            if (currentConversationId === requestConversationId && data.source_id) {
-                selectedSourceId = data.source_id;
-                renderSourceOptions();
-                setSourceLocked(true);
-            }
-            loadConversations();
-            updateActiveConversation();
-            updateCurrentSourceTitle();
-        } else {
-            const detail = data.detail ? ` (${data.detail})` : '';
-            failPendingMessage(requestConversationId, requestId, '❌ Error: ' + (data.error || 'Failed to get response') + detail);
-        }
+        await handleOkResponse(response);
     } catch (error) {
         console.error('Error sending message:', error);
         const errorMsg = (error && error.name === 'AbortError')
@@ -1267,6 +1435,11 @@ function renderMessageBubble(bubble, role, content, options = {}) {
         bubble.classList.add('message-bubble-md');
     }
     if (options.pending) {
+        if (role === 'assistant' && typeof content === 'string' && content.length > 0) {
+            bubble.classList.add('message-bubble-md', 'message-bubble-streaming');
+            bubble.innerHTML = renderAssistantMarkdown(content);
+            return;
+        }
         bubble.classList.add('message-bubble-pending');
         bubble.innerHTML = `
             <span class="pending-label">正在生成回复</span>
@@ -1338,7 +1511,10 @@ function addMessageToUI(role, content, options = {}) {
     if (options.pending) {
         message.classList.add('message-pending');
     }
-    
+    if (options.requestId) {
+        message.dataset.requestId = options.requestId;
+    }
+
     const avatar = document.createElement('div');
     avatar.className = 'message-avatar';
     avatar.textContent = role === 'user' ? '👤' : '🤖';
