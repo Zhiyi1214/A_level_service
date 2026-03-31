@@ -8,6 +8,8 @@ let lastEnterDownMs = 0;
 let sendBtnDefaultHtml = '';
 let availableSources = [];
 let selectedSourceId = '';
+/** 侧栏按时间排序后，最近一次活跃会话的知识库 id（用于新建聊天默认选中） */
+let defaultSourceIdForNewChat = '';
 const THEME_STORAGE_KEY = 'a_level_theme_v46';
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'a_level_sidebar_collapsed_v46';
 const MAX_UPLOAD_IMAGES = 3;
@@ -185,6 +187,7 @@ async function logoutAuth() {
     authUser = null;
     currentConversationId = null;
     selectedSourceId = '';
+    defaultSourceIdForNewChat = '';
     availableSources = [];
     renderSidebarStatus('');
     renderAuthPanel();
@@ -200,7 +203,8 @@ function setConversationServerData(conversationId, conv) {
         created_at: conv && conv.created_at ? conv.created_at : '',
         messages: Array.isArray(conv && conv.messages) ? conv.messages.slice() : [],
         source_id: conv && conv.source_id ? conv.source_id : '',
-        source_name: conv && conv.source_name ? conv.source_name : ''
+        source_name: conv && conv.source_name ? conv.source_name : '',
+        dify_title: conv && typeof conv.dify_title === 'string' ? conv.dify_title.trim() : ''
     };
 }
 
@@ -852,7 +856,15 @@ function setupEventListeners() {
     const sidebar = document.querySelector('.sidebar');
     const shellRail = document.querySelector('.shell-rail');
     const appContainer = document.querySelector('.app-container');
-    
+    const sourceLockHit = document.getElementById('sourceSelectLockHitbox');
+    if (sourceLockHit) {
+        sourceLockHit.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            showSourceLockHint();
+        });
+    }
+
     messageInput.addEventListener('input', function() {
         this.style.height = 'auto';
         this.style.height = Math.max(44, Math.min(this.scrollHeight, 140)) + 'px';
@@ -919,9 +931,45 @@ function onSourceChange() {
 
 function setSourceLocked(locked) {
     const select = document.getElementById('sourceSelect');
+    const hit = document.getElementById('sourceSelectLockHitbox');
     if (select) {
         select.disabled = !!locked;
+        select.title = locked ? '左上角新建聊天即可切换知识库' : '请选择知识库';
     }
+    if (hit) {
+        hit.hidden = !(locked && availableSources.length > 0);
+    }
+}
+
+function showSourceLockHint() {
+    let el = document.getElementById('sourceLockToast');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'sourceLockToast';
+        el.className = 'source-lock-toast';
+        el.setAttribute('role', 'status');
+        document.body.appendChild(el);
+    }
+    el.textContent = '左上角新建聊天即可切换知识库';
+    const wrap = document.getElementById('sourceSelectWrap');
+    const gap = 25;
+    if (wrap) {
+        const r = wrap.getBoundingClientRect();
+        el.style.left = `${Math.round(r.left + r.width / 2)}px`;
+        el.style.top = 'auto';
+        el.style.bottom = `${Math.round(window.innerHeight - r.top + gap)}px`;
+        el.style.transform = 'translateX(-50%)';
+    } else {
+        el.style.left = '50%';
+        el.style.top = 'auto';
+        el.style.bottom = '160px';
+        el.style.transform = 'translateX(-50%)';
+    }
+    el.hidden = false;
+    clearTimeout(showSourceLockHint._t);
+    showSourceLockHint._t = setTimeout(() => {
+        el.hidden = true;
+    }, 2800);
 }
 
 function renderSourceOptions() {
@@ -930,10 +978,12 @@ function renderSourceOptions() {
     if (!availableSources.length) {
         select.innerHTML = '<option value="">无知识库</option>';
         select.disabled = true;
+        const hitEmpty = document.getElementById('sourceSelectLockHitbox');
+        if (hitEmpty) hitEmpty.hidden = true;
         return;
     }
 
-    const placeholder = '<option value="">选择知识库</option>';
+    const placeholder = '<option value="">请选择知识库</option>';
     const options = availableSources
         .map(s => `<option value="${escapeHtml(String(s.id))}">${escapeHtml(String(s.name || s.id))}</option>`)
         .join('');
@@ -962,6 +1012,7 @@ async function loadSources() {
         availableSources = [];
     }
     renderSourceOptions();
+    syncNewChatDefaultSource({ force: false });
 }
 
 async function ensureSessionReady() {
@@ -1011,6 +1062,41 @@ async function ensureSessionReady() {
 
 let loadConversationsInFlight = null;
 
+/** 用于侧栏排序：取会话「最后活跃」时间（最后一条消息时间与创建时间的较大值） */
+function conversationActivityTimeMs(conv) {
+    if (!conv || typeof conv !== 'object') return 0;
+    let t = 0;
+    if (conv.created_at) {
+        const c = Date.parse(conv.created_at);
+        if (!Number.isNaN(c)) t = Math.max(t, c);
+    }
+    const lm = conv.last_message;
+    if (lm && typeof lm === 'object' && lm.timestamp) {
+        const m = Date.parse(lm.timestamp);
+        if (!Number.isNaN(m)) t = Math.max(t, m);
+    }
+    return t;
+}
+
+function pickDefaultSourceIdForNewChat() {
+    const sid = (defaultSourceIdForNewChat || '').trim();
+    if (sid && availableSources.some(s => s && s.id === sid)) return sid;
+    return '';
+}
+
+/**
+ * 无当前会话时同步知识库下拉框。
+ * @param {{ force?: boolean }} opts force 为 true 时（新建聊天）始终采用最近一次会话的知识库；否则仅在尚未选择时填充。
+ */
+function syncNewChatDefaultSource(opts = {}) {
+    if (currentConversationId) return;
+    if (opts.force || !selectedSourceId) {
+        selectedSourceId = pickDefaultSourceIdForNewChat();
+    }
+    renderSourceOptions();
+    updateCurrentSourceTitle();
+}
+
 // Load conversations from backend（合并并发请求，避免短时重复打满限流）
 async function loadConversations() {
     if (loadConversationsInFlight) {
@@ -1024,6 +1110,8 @@ async function loadConversations() {
                     container.innerHTML = '';
                 }
                 renderSidebarStatus('登录后查看会话');
+                defaultSourceIdForNewChat = '';
+                syncNewChatDefaultSource({ force: false });
                 return;
             }
             renderSidebarStatus('');
@@ -1042,21 +1130,34 @@ async function loadConversations() {
 
             if (data.conversations && Object.keys(data.conversations).length > 0) {
                 container.innerHTML = '';
-                Object.entries(data.conversations).forEach(([id, conv]) => {
+                const entries = Object.entries(data.conversations);
+                entries.sort(
+                    (a, b) => conversationActivityTimeMs(b[1]) - conversationActivityTimeMs(a[1])
+                );
+                const topConv = entries[0] && entries[0][1];
+                defaultSourceIdForNewChat = topConv && topConv.source_id
+                    ? String(topConv.source_id).trim()
+                    : '';
+                entries.forEach(([id, conv]) => {
                     const state = getConversationState(id);
                     if (state && state.serverConversation) {
                         state.serverConversation = {
                             ...state.serverConversation,
                             created_at: conv.created_at,
                             source_id: conv.source_id || '',
-                            source_name: conv.source_name || ''
+                            source_name: conv.source_name || '',
+                            dify_title: typeof conv.dify_title === 'string'
+                                ? conv.dify_title.trim()
+                                : ''
                         };
                     }
                     container.appendChild(createConversationItem(id, conv));
                 });
             } else {
                 container.innerHTML = '<div class="empty-state">还没有会话</div>';
+                defaultSourceIdForNewChat = '';
             }
+            syncNewChatDefaultSource({ force: false });
         } catch (error) {
             console.error('Error loading conversations:', error);
         } finally {
@@ -1066,43 +1167,19 @@ async function loadConversations() {
     return loadConversationsInFlight;
 }
 
-function getConversationPreview(conv) {
-    const lastMessage = conv && conv.last_message;
-    if (!lastMessage) return '新对话';
-    const role = lastMessage.role || '';
-    let content = coerceMessageContent(lastMessage.content);
-    if (Array.isArray(content)) {
-        const textPart = content.find(item => item && item.type === 'text' && item.text);
-        content = (textPart && textPart.text) || '图片消息';
-        if (role === 'user' && typeof content === 'string') {
-            content = normalizeUserPlainTextForDisplay(content);
-        }
-    } else if (typeof content === 'object' && content !== null) {
-        content = content.text != null ? String(content.text) : '消息';
-        if (role === 'user') {
-            content = normalizeUserPlainTextForDisplay(content);
-        }
-    } else if (typeof content === 'string') {
-        content = role === 'user'
-            ? normalizeUserPlainTextForDisplay(content)
-            : decodeAssistantEscapedContent(content);
-    } else {
-        content = String(content || '');
-    }
-    return content.length > 40 ? content.substring(0, 40) + '...' : content;
-}
-
 function createConversationItem(id, conv) {
     const div = document.createElement('div');
     div.className = 'conversation-item';
     div.dataset.convId = id;
     if (id === currentConversationId) div.classList.add('active');
 
-    const sourcePrefix = conv && conv.source_name ? `[${conv.source_name}] ` : '';
+    const difyTitle = conv && typeof conv.dify_title === 'string'
+        ? conv.dify_title.trim()
+        : '';
 
     const label = document.createElement('span');
     label.className = 'conversation-item-label';
-    label.textContent = sourcePrefix + getConversationPreview(conv);
+    label.textContent = difyTitle || '新对话';
 
     const delBtn = document.createElement('button');
     delBtn.className = 'delete-btn';
@@ -1118,12 +1195,10 @@ function createConversationItem(id, conv) {
 // Start new chat
 function startNewChat() {
     setCurrentConversation(null);
-    selectedSourceId = '';
     uploadedFiles = [];
     resetComposer();
-    renderSourceOptions();
+    syncNewChatDefaultSource({ force: true });
     setSourceLocked(false);
-    updateCurrentSourceTitle();
 
     const messagesArea = document.getElementById('messagesArea');
     messagesArea.innerHTML = renderWelcomeState();
@@ -1191,7 +1266,7 @@ function updateCurrentSourceTitle() {
     if (!el) {
         return;
     }
-    let label = '选择知识库';
+    let label = '请选择知识库';
     if (currentConversationId) {
         const sid = getConversationSourceId(currentConversationId);
         if (sid) {

@@ -6,15 +6,70 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import load_only, selectinload
 
 from config import settings
 from extensions import db
 from models import Conversation, Message, User, UserIdentity
 
 log = logging.getLogger(__name__)
+
+_CONVERSATIONS_TABLE = 'conversations'
+# 进程内缓存：避免每次请求 inspect；部署后执行 migrate 需重启进程以识别新列
+_conversation_column_names: frozenset[str] | None | bool = False  # False = 未探测
+
+
+def _conversation_cols() -> frozenset[str] | None:
+    """返回 conversations 表当前列名；探测失败时返回 None（按「列齐全」走 ORM）。"""
+    global _conversation_column_names
+    if _conversation_column_names is not False:
+        return _conversation_column_names  # type: ignore[return-value]
+    try:
+        from sqlalchemy import inspect as sa_inspect
+
+        insp = sa_inspect(db.engine)
+        names = frozenset(
+            c['name'] for c in insp.get_columns(_CONVERSATIONS_TABLE)
+        )
+        _conversation_column_names = names
+        return names
+    except Exception:
+        log.exception('inspect conversations columns failed')
+        _conversation_column_names = None
+        return None
+
+
+def _has_dify_conversation_name_column() -> bool:
+    cols = _conversation_cols()
+    if cols is None:
+        return True
+    return 'dify_conversation_name' in cols
+
+
+def _conversation_load_only_core():
+    """不含 dify_conversation_name，供缺列库使用。"""
+    return load_only(
+        Conversation.id,
+        Conversation.user_id,
+        Conversation.source_id,
+        Conversation.source_name,
+        Conversation.upstream_conversation_id,
+        Conversation.dify_file_cache,
+        Conversation.created_at,
+    )
+
+
+def _load_conversation_row(session_id: str) -> Conversation | None:
+    """按是否已有 dify_conversation_name 列选择加载方式，避免 SELECT 引用不存在的列。"""
+    if _has_dify_conversation_name_column():
+        return db.session.get(Conversation, session_id)
+    return db.session.scalar(
+        select(Conversation)
+        .where(Conversation.id == session_id)
+        .options(_conversation_load_only_core())
+    )
 
 
 def _to_utc(dt: datetime | str) -> datetime:
@@ -49,15 +104,28 @@ class PostgresStore:
         self, session_id: str, user_id: str, source_id: str, source_name: str
     ) -> dict:
         now = datetime.now(timezone.utc)
-        row = Conversation(
-            id=session_id,
-            user_id=user_id,
-            source_id=source_id,
-            source_name=source_name,
-            upstream_conversation_id='',
-            created_at=now,
-        )
-        db.session.add(row)
+        if _has_dify_conversation_name_column():
+            row = Conversation(
+                id=session_id,
+                user_id=user_id,
+                source_id=source_id,
+                source_name=source_name,
+                upstream_conversation_id='',
+                created_at=now,
+            )
+            db.session.add(row)
+        else:
+            # 库表尚未 alembic 升级含 dify_conversation_name 时，避免 INSERT 引用不存在的列
+            db.session.execute(
+                insert(Conversation.__table__).values(
+                    id=session_id,
+                    user_id=user_id,
+                    source_id=source_id,
+                    source_name=source_name,
+                    upstream_conversation_id='',
+                    created_at=now,
+                )
+            )
         db.session.commit()
         created_iso = _isoformat_utc(now)
         return {
@@ -66,25 +134,35 @@ class PostgresStore:
             'source_id': source_id,
             'source_name': source_name,
             'upstream_conversation_id': '',
+            'dify_conversation_name': '',
             'messages': [],
             'created_at': created_iso,
         }
 
     def get(self, session_id: str) -> dict | None:
+        opts = [selectinload(Conversation.messages)]
+        if not _has_dify_conversation_name_column():
+            opts.append(_conversation_load_only_core())
         conv = db.session.scalar(
             select(Conversation)
             .where(Conversation.id == session_id)
-            .options(selectinload(Conversation.messages))
+            .options(*opts)
         )
         if conv is None:
             return None
         messages = sorted(conv.messages, key=lambda m: m.id)
+        dname = (
+            (conv.dify_conversation_name or '')
+            if _has_dify_conversation_name_column()
+            else ''
+        )
         return {
             'id': conv.id,
             'user_id': conv.user_id,
             'source_id': conv.source_id,
             'source_name': conv.source_name,
             'upstream_conversation_id': conv.upstream_conversation_id,
+            'dify_conversation_name': dname,
             'created_at': _isoformat_utc(conv.created_at),
             'messages': [
                 {
@@ -97,7 +175,7 @@ class PostgresStore:
         }
 
     def get_summary(self, session_id: str) -> dict | None:
-        conv = db.session.get(Conversation, session_id)
+        conv = _load_conversation_row(session_id)
         if conv is None:
             return None
         msg_count = db.session.scalar(
@@ -126,15 +204,22 @@ class PostgresStore:
             ),
             'source_id': conv.source_id,
             'source_name': conv.source_name,
+            'upstream_conversation_id': conv.upstream_conversation_id,
+            'dify_conversation_name': (
+                (conv.dify_conversation_name or '')
+                if _has_dify_conversation_name_column()
+                else ''
+            ),
         }
 
     def list_by_user(self, user_id: str) -> dict:
         """与逐条 get_summary 语义一致；用批量查询避免 N+1。"""
-        convs = db.session.scalars(
-            select(Conversation)
-            .where(Conversation.user_id == user_id)
-            .order_by(Conversation.created_at.desc())
-        ).all()
+        q = select(Conversation).where(Conversation.user_id == user_id).order_by(
+            Conversation.created_at.desc()
+        )
+        if not _has_dify_conversation_name_column():
+            q = q.options(_conversation_load_only_core())
+        convs = db.session.scalars(q).all()
         if not convs:
             return {}
         conv_ids = [c.id for c in convs]
@@ -181,11 +266,17 @@ class PostgresStore:
                 ),
                 'source_id': conv.source_id,
                 'source_name': conv.source_name,
+                'upstream_conversation_id': conv.upstream_conversation_id,
+                'dify_conversation_name': (
+                    (conv.dify_conversation_name or '')
+                    if _has_dify_conversation_name_column()
+                    else ''
+                ),
             }
         return result
 
     def delete(self, session_id: str) -> bool:
-        conv = db.session.get(Conversation, session_id)
+        conv = _load_conversation_row(session_id)
         if conv is None:
             return False
         db.session.delete(conv)
@@ -209,13 +300,21 @@ class PostgresStore:
     def update_upstream_id(
         self, session_id: str, upstream_conversation_id: str
     ) -> None:
-        conv = db.session.get(Conversation, session_id)
+        conv = _load_conversation_row(session_id)
         if conv is not None:
             conv.upstream_conversation_id = upstream_conversation_id
             db.session.commit()
 
+    def update_dify_conversation_name(self, session_id: str, name: str) -> None:
+        if not _has_dify_conversation_name_column():
+            return
+        conv = _load_conversation_row(session_id)
+        if conv is not None:
+            conv.dify_conversation_name = name or ''
+            db.session.commit()
+
     def get_dify_file_cache(self, session_id: str) -> dict[str, str]:
-        conv = db.session.get(Conversation, session_id)
+        conv = _load_conversation_row(session_id)
         if conv is None:
             return {}
         raw = conv.dify_file_cache
@@ -234,7 +333,7 @@ class PostgresStore:
         fid = (upload_file_id or '').strip()
         if not h or not fid:
             return
-        conv = db.session.get(Conversation, session_id)
+        conv = _load_conversation_row(session_id)
         if conv is None:
             return
         cache: dict[str, str] = {}

@@ -6,6 +6,7 @@ from auth.context import effective_user_id, oauth_login_required_response
 from config import settings
 from extensions import limiter
 from services import image_service
+from services.dify_conversations import hydrate_dify_titles
 from storage import store
 
 log = logging.getLogger(__name__)
@@ -39,12 +40,19 @@ def get_conversations():
         if settings.OAUTH_CONFIGURED and not user_id:
             return oauth_login_required_response()
         raw = store.list_by_user(user_id)
+        try:
+            hydrate_dify_titles(raw, user_id)
+        except Exception:
+            log.exception('hydrate_dify_titles failed')
         hydrated = {}
         for cid, summary in raw.items():
             if not isinstance(summary, dict):
                 hydrated[cid] = summary
                 continue
             s = dict(summary)
+            s.pop('upstream_conversation_id', None)
+            dname = (s.pop('dify_conversation_name', None) or '').strip()
+            s['dify_title'] = dname
             lm = s.get('last_message')
             if isinstance(lm, dict):
                 lm = dict(lm)
@@ -80,6 +88,7 @@ def get_conversation(conversation_id):
             'messages': messages,
             'source_id': conv.get('source_id', ''),
             'source_name': conv.get('source_name', ''),
+            'dify_title': (conv.get('dify_conversation_name') or '').strip(),
         }), 200
     except Exception:
         log.exception("get_conversation failed")

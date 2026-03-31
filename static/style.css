@@ -1054,6 +1054,54 @@ body[data-theme="light"] .shell-rail-btn:hover {
     gap: 8px;
 }
 
+.source-select-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: stretch;
+}
+
+.source-select-lock-hitbox {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    padding: 0;
+    border: none;
+    border-radius: 16px;
+    background: transparent;
+    cursor: pointer;
+    z-index: 2;
+}
+
+.source-select-lock-hitbox:focus {
+    outline: none;
+}
+
+.source-select-lock-hitbox:focus-visible {
+    outline: 2px solid var(--border-strong);
+    outline-offset: 2px;
+}
+
+.source-lock-toast {
+    position: fixed;
+    /* left / bottom / transform 由 showSourceLockHint 按选择器位置计算 */
+    z-index: 10000;
+    padding: 10px 16px;
+    border-radius: 12px;
+    background: var(--bg-elevated-strong);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow-soft);
+    font-size: 13px;
+    font-weight: 500;
+    max-width: min(90vw, 320px);
+    text-align: center;
+    pointer-events: none;
+}
+
+.source-lock-toast[hidden] {
+    display: none !important;
+}
+
 .source-select-inline {
     height: 42px;
     min-width: 152px;
@@ -1353,10 +1401,17 @@ body[data-theme="light"] .shell-rail-btn:hover {
         justify-content: flex-end;
     }
 
+    .source-select-wrap {
+        flex: 1 1 auto;
+        min-width: 0;
+        max-width: none;
+    }
+
     .source-select-inline {
         flex: 1 1 auto;
         min-width: 0;
         max-width: none;
+        width: 100%;
     }
 
 }

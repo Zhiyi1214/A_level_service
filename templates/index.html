@@ -62,7 +62,7 @@
                         </div>
                     </div>
                 </div>
-                <h1 class="main-chrome-title" id="currentSourceTitle">选择知识库</h1>
+                <h1 class="main-chrome-title" id="currentSourceTitle">请选择知识库</h1>
                 <div class="main-chrome-spacer" aria-hidden="true"></div>
             </header>
 
@@ -94,9 +94,13 @@
                             rows="1"
                         ></textarea>
                         <div class="input-actions">
-                            <select id="sourceSelect" class="source-select-inline" onchange="onSourceChange()" title="选择知识库">
-                                <option value="">选择知识库</option>
-                            </select>
+                            <div class="source-select-wrap" id="sourceSelectWrap">
+                                <select id="sourceSelect" class="source-select-inline" onchange="onSourceChange()" title="请选择知识库">
+                                    <option value="">请选择知识库</option>
+                                </select>
+                                <button type="button" class="source-select-lock-hitbox" id="sourceSelectLockHitbox" hidden
+                                    aria-label="左上角新建聊天即可切换知识库"></button>
+                            </div>
                             <button class="send-btn" id="sendBtn" type="button" onclick="sendMessage()" title="发送">
                                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                                     <line x1="22" y1="2" x2="11" y2="13"></line>
