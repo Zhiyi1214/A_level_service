@@ -139,23 +139,90 @@ class PostgresStore:
             'created_at': created_iso,
         }
 
-    def get(self, session_id: str) -> dict | None:
-        opts = [selectinload(Conversation.messages)]
-        if not _has_dify_conversation_name_column():
-            opts.append(_conversation_load_only_core())
-        conv = db.session.scalar(
-            select(Conversation)
-            .where(Conversation.id == session_id)
-            .options(*opts)
-        )
+    @staticmethod
+    def _message_to_dict(m: Message) -> dict[str, Any]:
+        return {
+            'id': m.id,
+            'role': m.role,
+            'content': m.content,
+            'timestamp': _isoformat_utc(m.timestamp),
+        }
+
+    def get(
+        self,
+        session_id: str,
+        *,
+        message_limit: int | None = None,
+        before_message_id: int | None = None,
+    ) -> dict | None:
+        """读取会话。未传 message_limit 时返回全部消息；传入时返回按 id 排序的一段窗口（用于分页）。"""
+
+        if message_limit is None:
+            opts = [selectinload(Conversation.messages)]
+            if not _has_dify_conversation_name_column():
+                opts.append(_conversation_load_only_core())
+            conv = db.session.scalar(
+                select(Conversation)
+                .where(Conversation.id == session_id)
+                .options(*opts)
+            )
+            if conv is None:
+                return None
+            messages = sorted(conv.messages, key=lambda m: m.id)
+            dname = (
+                (conv.dify_conversation_name or '')
+                if _has_dify_conversation_name_column()
+                else ''
+            )
+            total = len(messages)
+            return {
+                'id': conv.id,
+                'user_id': conv.user_id,
+                'source_id': conv.source_id,
+                'source_name': conv.source_name,
+                'upstream_conversation_id': conv.upstream_conversation_id,
+                'dify_conversation_name': dname,
+                'created_at': _isoformat_utc(conv.created_at),
+                'messages': [self._message_to_dict(m) for m in messages],
+                'message_count_total': total,
+                'messages_truncated': False,
+                'has_more_older': False,
+            }
+
+        conv = _load_conversation_row(session_id)
         if conv is None:
             return None
-        messages = sorted(conv.messages, key=lambda m: m.id)
         dname = (
             (conv.dify_conversation_name or '')
             if _has_dify_conversation_name_column()
             else ''
         )
+        total = int(
+            db.session.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.conversation_id == session_id)
+            )
+            or 0
+        )
+        q = select(Message).where(Message.conversation_id == session_id)
+        if before_message_id is not None:
+            q = q.where(Message.id < before_message_id)
+        q = q.order_by(Message.id.desc()).limit(message_limit)
+        rows = list(db.session.scalars(q).all())
+        rows.reverse()
+        oldest_id = rows[0].id if rows else None
+        has_more_older = False
+        if oldest_id is not None:
+            n_older = db.session.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(
+                    Message.conversation_id == session_id,
+                    Message.id < oldest_id,
+                )
+            )
+            has_more_older = int(n_older or 0) > 0
         return {
             'id': conv.id,
             'user_id': conv.user_id,
@@ -164,14 +231,10 @@ class PostgresStore:
             'upstream_conversation_id': conv.upstream_conversation_id,
             'dify_conversation_name': dname,
             'created_at': _isoformat_utc(conv.created_at),
-            'messages': [
-                {
-                    'role': m.role,
-                    'content': m.content,
-                    'timestamp': _isoformat_utc(m.timestamp),
-                }
-                for m in messages
-            ],
+            'messages': [self._message_to_dict(m) for m in rows],
+            'message_count_total': total,
+            'messages_truncated': total > len(rows),
+            'has_more_older': has_more_older,
         }
 
     def get_summary(self, session_id: str) -> dict | None:

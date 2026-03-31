@@ -13,6 +13,8 @@ let defaultSourceIdForNewChat = '';
 const THEME_STORAGE_KEY = 'a_level_theme_v46';
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'a_level_sidebar_collapsed_v46';
 const MAX_UPLOAD_IMAGES = 3;
+/** 会话详情首次加载与「加载更早」时每页条数 */
+const CONVERSATION_MESSAGE_PAGE_SIZE = 8;
 const conversationStates = new Map();
 
 function getConversationState(conversationId) {
@@ -24,7 +26,8 @@ function getConversationState(conversationId) {
             serverConversation: null,
             localMessages: [],
             pendingCount: 0,
-            abortController: null
+            abortController: null,
+            loadingOlderMessages: false
         });
     }
     return conversationStates.get(conversationId);
@@ -50,6 +53,23 @@ function conversationsQueryString() {
         return '';
     }
     return `?user_id=${encodeURIComponent(anonymousUserId)}`;
+}
+
+/** 单条会话 API（支持 message_limit / before_message_id 分页） */
+function conversationDetailUrl(conversationId, query = {}) {
+    const base = `/api/conversations/${encodeURIComponent(conversationId)}`;
+    const params = new URLSearchParams();
+    if (!oauthConfigured && anonymousUserId) {
+        params.set('user_id', anonymousUserId);
+    }
+    if (query.messageLimit != null) {
+        params.set('message_limit', String(query.messageLimit));
+    }
+    if (query.beforeMessageId != null) {
+        params.set('before_message_id', String(query.beforeMessageId));
+    }
+    const s = params.toString();
+    return s ? `${base}?${s}` : base;
 }
 
 async function initAuth() {
@@ -204,8 +224,48 @@ function setConversationServerData(conversationId, conv) {
         messages: Array.isArray(conv && conv.messages) ? conv.messages.slice() : [],
         source_id: conv && conv.source_id ? conv.source_id : '',
         source_name: conv && conv.source_name ? conv.source_name : '',
-        dify_title: conv && typeof conv.dify_title === 'string' ? conv.dify_title.trim() : ''
+        dify_title: conv && typeof conv.dify_title === 'string' ? conv.dify_title.trim() : '',
+        has_more_older: !!(conv && conv.has_more_older),
+        message_count_total:
+            conv && typeof conv.message_count_total === 'number'
+                ? conv.message_count_total
+                : null
     };
+}
+
+function getOldestServerMessageId(conversationId) {
+    const state = getConversationState(conversationId);
+    const msgs = state && state.serverConversation && Array.isArray(state.serverConversation.messages)
+        ? state.serverConversation.messages
+        : [];
+    let minId = null;
+    for (const m of msgs) {
+        const id = m && m.id != null ? Number(m.id) : null;
+        if (id != null && !Number.isNaN(id)) {
+            if (minId == null || id < minId) {
+                minId = id;
+            }
+        }
+    }
+    return minId;
+}
+
+function mergeOlderServerMessages(existing, olderBatch) {
+    const byId = new Map();
+    for (const m of olderBatch || []) {
+        if (m && m.id != null) {
+            byId.set(Number(m.id), m);
+        }
+    }
+    for (const m of existing || []) {
+        if (m && m.id != null) {
+            const k = Number(m.id);
+            if (!byId.has(k)) {
+                byId.set(k, m);
+            }
+        }
+    }
+    return Array.from(byId.values()).sort((a, b) => Number(a.id) - Number(b.id));
 }
 
 function addLocalMessages(conversationId, messages) {
@@ -309,22 +369,66 @@ function getConversationMessagesForView(conversationId) {
     return serverMessages.concat(state.localMessages);
 }
 
-function renderConversationView(conversationId) {
+function conversationServerMessagesEqual(a, b) {
+    const aa = Array.isArray(a) ? a : [];
+    const bb = Array.isArray(b) ? b : [];
+    if (aa.length !== bb.length) {
+        return false;
+    }
+    for (let i = 0; i < aa.length; i++) {
+        if (aa[i].role !== bb[i].role) {
+            return false;
+        }
+        if (String(aa[i].content || '') !== String(bb[i].content || '')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function renderConversationView(conversationId, options = {}) {
+    const preserveScroll = !!(options && options.preserveScroll);
     const messagesArea = document.getElementById('messagesArea');
     if (!messagesArea) return;
     const messages = getConversationMessagesForView(conversationId);
+    let prevScrollHeight = 0;
+    let prevScrollTop = 0;
+    if (preserveScroll) {
+        prevScrollHeight = messagesArea.scrollHeight;
+        prevScrollTop = messagesArea.scrollTop;
+    }
     messagesArea.innerHTML = '';
     if (!messages.length) {
         messagesArea.innerHTML = renderWelcomeState();
         return;
     }
+    const state = getConversationState(conversationId);
+    const showOlderHint = !!(
+        state
+        && state.serverConversation
+        && state.serverConversation.has_more_older
+        && state.loadingOlderMessages
+    );
+    if (showOlderHint) {
+        const hint = document.createElement('div');
+        hint.className = 'messages-area-older-loading';
+        hint.setAttribute('role', 'status');
+        hint.textContent = '加载更早消息…';
+        messagesArea.appendChild(hint);
+    }
     messages.forEach(msg => {
         addMessageToUI(msg.role, msg.content, {
             pending: !!msg.pending,
-            requestId: msg.requestId || undefined
+            requestId: msg.requestId || undefined,
+            skipScroll: true
         });
     });
-    scrollMessagesToBottom();
+    if (preserveScroll) {
+        const delta = messagesArea.scrollHeight - prevScrollHeight;
+        messagesArea.scrollTop = Math.max(0, prevScrollTop + delta);
+    } else {
+        scrollMessagesToBottom();
+    }
 }
 
 // Initialize app
@@ -377,6 +481,10 @@ function renderWelcomeState() {
             </div>
         </div>
     `;
+}
+
+function renderMessagesLoadingPlaceholder() {
+    return '<div class="messages-area-loading" role="status">加载会话…</div>';
 }
 
 function applyTheme(theme) {
@@ -915,6 +1023,30 @@ function setupEventListeners() {
             syncSidebarButtons();
         }
     });
+
+    const messagesArea = document.getElementById('messagesArea');
+    if (messagesArea) {
+        messagesArea.addEventListener(
+            'scroll',
+            () => {
+                if (!currentConversationId) {
+                    return;
+                }
+                if (messagesArea.scrollTop > 120) {
+                    return;
+                }
+                const st = getConversationState(currentConversationId);
+                if (!st || !st.serverConversation || st.loadingOlderMessages) {
+                    return;
+                }
+                if (!st.serverConversation.has_more_older) {
+                    return;
+                }
+                loadOlderConversationMessages(currentConversationId);
+            },
+            { passive: true }
+        );
+    }
 }
 
 function onSourceChange() {
@@ -1206,28 +1338,107 @@ function startNewChat() {
     loadConversations();
 }
 
+async function loadOlderConversationMessages(conversationId) {
+    const state = getConversationState(conversationId);
+    if (!state || !state.serverConversation) {
+        return;
+    }
+    if (!state.serverConversation.has_more_older || state.loadingOlderMessages) {
+        return;
+    }
+    const beforeId = getOldestServerMessageId(conversationId);
+    if (beforeId == null) {
+        return;
+    }
+
+    state.loadingOlderMessages = true;
+    if (currentConversationId === conversationId) {
+        renderConversationView(conversationId, { preserveScroll: true });
+    }
+    try {
+        const response = await fetch(
+            conversationDetailUrl(conversationId, {
+                messageLimit: CONVERSATION_MESSAGE_PAGE_SIZE,
+                beforeMessageId: beforeId
+            }),
+            { credentials: 'same-origin' }
+        );
+        if (!response.ok) {
+            return;
+        }
+        const data = await response.json();
+        if (!data.success) {
+            return;
+        }
+        const batch = Array.isArray(data.messages) ? data.messages : [];
+        state.serverConversation.messages = mergeOlderServerMessages(
+            state.serverConversation.messages,
+            batch
+        );
+        state.serverConversation.has_more_older = !!data.has_more_older;
+        if (typeof data.message_count_total === 'number') {
+            state.serverConversation.message_count_total = data.message_count_total;
+        }
+    } catch (e) {
+        console.error('loadOlderConversationMessages:', e);
+    } finally {
+        state.loadingOlderMessages = false;
+        if (currentConversationId === conversationId) {
+            renderConversationView(conversationId, { preserveScroll: true });
+        }
+    }
+}
+
 // Switch conversation
 async function switchConversation(conversationId) {
     setCurrentConversation(conversationId);
     selectedSourceId = getConversationSourceId(conversationId) || selectedSourceId;
     renderSourceOptions();
     setSourceLocked(true);
-    renderConversationView(conversationId);
     closeSidebar();
+
+    const state = getConversationState(conversationId);
+    if (state) {
+        state.loadingOlderMessages = false;
+        if (state.serverConversation) {
+            state.serverConversation = {
+                ...state.serverConversation,
+                messages: [],
+                has_more_older: false,
+                message_count_total: null
+            };
+        }
+    }
+
+    const hadRenderableMessages = getConversationMessagesForView(conversationId).length > 0;
+    const messagesArea = document.getElementById('messagesArea');
+    if (hadRenderableMessages) {
+        renderConversationView(conversationId);
+    } else if (messagesArea) {
+        messagesArea.innerHTML = renderMessagesLoadingPlaceholder();
+    }
+
     try {
         const response = await fetch(
-            `/api/conversations/${encodeURIComponent(conversationId)}${conversationsQueryString()}`,
+            conversationDetailUrl(conversationId, { messageLimit: CONVERSATION_MESSAGE_PAGE_SIZE }),
             { credentials: 'same-origin' }
         );
         if (!response.ok) {
             console.error('Error loading conversation: HTTP', response.status);
+            renderConversationView(conversationId);
             return;
         }
         const data = await response.json();
         if (!data.success) {
             console.error('Error loading conversation:', data.error);
+            renderConversationView(conversationId);
             return;
         }
+
+        const prevServerMessages = state && state.serverConversation
+            && Array.isArray(state.serverConversation.messages)
+            ? state.serverConversation.messages
+            : null;
 
         setConversationServerData(conversationId, data);
         uploadedFiles = [];
@@ -1237,11 +1448,17 @@ async function switchConversation(conversationId) {
             renderSourceOptions();
         }
         setSourceLocked(true);
-        renderConversationView(conversationId);
+
+        const nextMessages = Array.isArray(data.messages) ? data.messages : [];
+        const serverChanged = !conversationServerMessagesEqual(prevServerMessages, nextMessages);
+        const hasLocalTail = state && Array.isArray(state.localMessages) && state.localMessages.length > 0;
+        if (!hadRenderableMessages || serverChanged || hasLocalTail) {
+            renderConversationView(conversationId);
+        }
         updateCurrentSourceTitle();
-        loadConversations();
     } catch (error) {
         console.error('Error loading conversation:', error);
+        renderConversationView(conversationId);
     }
 }
 
@@ -1288,7 +1505,7 @@ async function deleteConversation(conversationId, event) {
     
     try {
         const response = await fetch(
-            `/api/conversations/${encodeURIComponent(conversationId)}${conversationsQueryString()}`,
+            conversationDetailUrl(conversationId),
             { method: 'DELETE', credentials: 'same-origin' }
         );
         
@@ -1570,8 +1787,13 @@ async function refreshConversationFromServer(conversationId, options = {}) {
     if (!conversationId) return;
     const skipViewRender = !!(options && options.skipViewRender);
     try {
+        const state = getConversationState(conversationId);
+        const prevLen = state && state.serverConversation && Array.isArray(state.serverConversation.messages)
+            ? state.serverConversation.messages.length
+            : 0;
+        const lim = Math.min(200, Math.max(CONVERSATION_MESSAGE_PAGE_SIZE, prevLen + 4));
         const response = await fetch(
-            `/api/conversations/${encodeURIComponent(conversationId)}${conversationsQueryString()}`,
+            conversationDetailUrl(conversationId, { messageLimit: lim }),
             { credentials: 'same-origin' }
         );
         if (!response.ok) {
@@ -1959,7 +2181,9 @@ function addMessageToUI(role, content, options = {}) {
     }
     
     messagesArea.appendChild(message);
-    scrollMessagesToBottom();
+    if (!options.skipScroll) {
+        scrollMessagesToBottom();
+    }
     return message;
 }
 

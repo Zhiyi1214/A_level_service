@@ -713,6 +713,24 @@ body[data-theme="light"] .shell-rail-btn:hover {
     gap: 18px;
 }
 
+.messages-area-loading {
+    flex: 1;
+    min-height: 200px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    color: var(--text-secondary);
+}
+
+.messages-area-older-loading {
+    flex-shrink: 0;
+    padding: 8px 0 4px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
 .welcome-section {
     flex: 1;
     min-height: 280px;

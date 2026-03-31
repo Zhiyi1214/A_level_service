@@ -4,8 +4,6 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
-from werkzeug.middleware.proxy_fix import ProxyFix
-
 from config import settings
 
 oauth = OAuth()
@@ -48,7 +46,6 @@ def init_extensions(app):
     db.init_app(app)
     migrate.init_app(app, db)
     init_session(app)
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     _cors_kwargs: dict = {'origins': settings.CORS_ORIGINS}
     # 带 Cookie 的跨域请求不能与 origins=* 同时使用
     if settings.OAUTH_CONFIGURED and not (

@@ -94,9 +94,8 @@ S3_ACCESS_KEY = (os.getenv('S3_ACCESS_KEY') or '').strip()
 S3_SECRET_KEY = (os.getenv('S3_SECRET_KEY') or '').strip()
 S3_BUCKET = (os.getenv('S3_BUCKET') or 'a-level-uploads').strip()
 S3_REGION = (os.getenv('S3_REGION') or 'us-east-1').strip()
-# 浏览器访问预签名 URL 时使用的主机（例如 http://localhost:9000）；留空则使用 boto 生成的原始地址
-S3_BROWSER_BASE_URL = (os.getenv('S3_BROWSER_BASE_URL') or '').strip().rstrip('/')
-S3_PRESIGN_EXPIRES = int(os.getenv('S3_PRESIGN_EXPIRES', 604800))
+# 内网 custom_api 等上游拉取对象时的预签名有效期（秒）；浏览器走 /api/media，不用此值生成外链
+S3_PRESIGN_EXPIRES = int(os.getenv('S3_PRESIGN_EXPIRES', 3600))
 
 # ---------------------------------------------------------------------------
 # Storage（仅 PostgreSQL，不再支持 SQLite）

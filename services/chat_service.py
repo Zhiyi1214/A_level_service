@@ -8,6 +8,8 @@ from typing import Any, Callable, Iterator, Optional
 
 import httpx
 
+from services import image_service
+
 log = logging.getLogger(__name__)
 
 _UUID_CONV_RE = re.compile(
@@ -131,7 +133,11 @@ def iter_source_api_stream(
             yield from _stream_dify_workflow(source, message, user_id)
         elif source_type == 'custom_api':
             yield from _stream_custom_api(
-                source, message, conversation_id, user_id, image_data
+                source,
+                message,
+                conversation_id,
+                user_id,
+                _custom_api_image_payload(image_data),
             )
         else:
             yield {'kind': 'error', 'message': f'Unsupported source type: {source_type}'}
@@ -151,6 +157,28 @@ def iter_source_api_stream(
 # ======================================================================
 # Internal helpers
 # ======================================================================
+
+
+def _custom_api_image_payload(image_data) -> list | None:
+    """浏览器用 /api/media；custom_api 上游需直接拉对象时改为内网预签名 URL。"""
+    if not image_data:
+        return image_data
+    out: list = []
+    for seg in image_data:
+        if not isinstance(seg, dict):
+            out.append(seg)
+            continue
+        if seg.get('type') != 'image':
+            out.append(seg)
+            continue
+        item = dict(seg)
+        key = item.get('object_key')
+        if isinstance(key, str) and key and image_service.is_s3_configured():
+            url = image_service.presigned_get_url_internal(key)
+            if url:
+                item['url'] = url
+        out.append(item)
+    return out
 
 
 def _source_headers(source, *, include_content_type=True):

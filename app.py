@@ -1,3 +1,7 @@
+from gevent import monkey
+
+monkey.patch_all()
+
 import psycogreen.gevent
 
 psycogreen.gevent.patch_psycopg()
@@ -26,7 +30,7 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = settings.SESSION_COOKIE_SECURE
 app.config['MAX_CONTENT_LENGTH'] = settings.MAX_CONTENT_LENGTH
 
-# 信任一层反向代理（如 Nginx），使 request.remote_addr / X-Forwarded-* 对 Flask-Limiter 等生效
+# 信任一层反向代理（Nginx 已将 X-Forwarded-For 设为可信单一 IP：CF-Connecting-IP 或直连 remote_addr）
 app.wsgi_app = ProxyFix(
     app.wsgi_app,
     x_for=1,
@@ -49,11 +53,13 @@ from routes.auth_routes import auth_bp    # noqa: E402
 from routes.chat import chat_bp           # noqa: E402
 from routes.conversations import conversations_bp  # noqa: E402
 from routes.sources import sources_bp     # noqa: E402
+from routes.media import media_bp          # noqa: E402
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(chat_bp)
 app.register_blueprint(conversations_bp)
 app.register_blueprint(sources_bp)
+app.register_blueprint(media_bp)
 
 # ---------------------------------------------------------------------------
 # Middleware

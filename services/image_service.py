@@ -9,6 +9,7 @@ import re
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -20,7 +21,6 @@ from config import settings
 log = logging.getLogger(__name__)
 
 _s3_client = None
-_s3_presign_client = None
 
 
 def allowed_file(filename: str) -> bool:
@@ -64,30 +64,48 @@ def _get_s3_client():
     return _s3_client
 
 
-def _presign_endpoint_url() -> str:
-    """预签名 URL 的 Host 须与浏览器请求一致（SigV4 含 Host）；勿先签 minio:9000 再换成 localhost。"""
-    pub = (settings.S3_BROWSER_BASE_URL or settings.S3_ENDPOINT_URL or '').strip().rstrip('/')
-    return pub
+def gated_public_media_url(object_key: str, *, viewer_user_id: str | None) -> str:
+    """同源受控下载地址（经 /api/media 校验属主）；非 OAuth 时依赖 ?user_id= 与 object_key 前缀一致。"""
+    key = (object_key or '').strip()
+    if not key:
+        return ''
+    path = f'/api/media/{key}'
+    if settings.OAUTH_CONFIGURED:
+        return path
+    uid = (viewer_user_id or '').strip() or 'default_user'
+    return f'{path}?user_id={quote(uid, safe="")}'
 
 
-def _get_s3_presign_client():
-    global _s3_presign_client
-    if _s3_presign_client is None and is_s3_configured():
-        endpoint = _presign_endpoint_url()
-        if not endpoint:
-            return None
-        _s3_presign_client = boto3.client(
-            's3',
-            endpoint_url=endpoint,
-            aws_access_key_id=settings.S3_ACCESS_KEY,
-            aws_secret_access_key=settings.S3_SECRET_KEY,
-            config=Config(
-                signature_version='s3v4',
-                s3={'addressing_style': 'path'},
-            ),
-            region_name=settings.S3_REGION,
-        )
-    return _s3_presign_client
+def presigned_get_url_internal(object_key: str, *, expires_seconds: int | None = None) -> str:
+    """供内网上游服务拉取对象（如 custom_api）；使用 S3_ENDPOINT_URL 签名，勿发给浏览器。"""
+    key = (object_key or '').strip()
+    if not key or not is_s3_configured():
+        return ''
+    client = _get_s3_client()
+    if not client:
+        return ''
+    exp = expires_seconds if expires_seconds is not None else settings.S3_PRESIGN_EXPIRES
+    exp = max(60, min(int(exp), 86400))
+    return client.generate_presigned_url(
+        'get_object',
+        Params={'Bucket': settings.S3_BUCKET, 'Key': key},
+        ExpiresIn=exp,
+    )
+
+
+def open_chat_object_stream(object_key: str) -> tuple[Any, str] | None:
+    """从桶读取对象，返回 (StreamingBody, Content-Type)。调用方负责关闭 Body。"""
+    key = (object_key or '').strip()
+    if not key or not is_s3_configured():
+        return None
+    client = _get_s3_client()
+    if not client:
+        return None
+    resp = client.get_object(Bucket=settings.S3_BUCKET, Key=key)
+    body = resp['Body']
+    name = key.rsplit('/', 1)[-1] if '/' in key else key
+    ctype = resp.get('ContentType') or get_mime_type(name)
+    return body, str(ctype)
 
 
 def ensure_bucket_exists() -> None:
@@ -124,17 +142,6 @@ def build_object_key(user_id: str, conversation_id: str | None, filename: str) -
     return f"chat/{uid}/{cid}/{uuid.uuid4().hex}_{stem}"
 
 
-def _presigned_get_url(object_key: str) -> str:
-    client = _get_s3_presign_client()
-    if not client:
-        return ''
-    return client.generate_presigned_url(
-        'get_object',
-        Params={'Bucket': settings.S3_BUCKET, 'Key': object_key},
-        ExpiresIn=settings.S3_PRESIGN_EXPIRES,
-    )
-
-
 def upload_image_bytes(
     user_id: str,
     conversation_id: str | None,
@@ -142,7 +149,7 @@ def upload_image_bytes(
     mime_type: str,
     body: bytes,
 ) -> dict[str, str]:
-    """上传单张图片到 MinIO/S3，返回 url（预签名）与 object_key。"""
+    """上传单张图片到 MinIO/S3，返回 url（同源 /api/media）与 object_key。"""
     if not is_s3_configured():
         return {'url': '', 'object_key': ''}
     client = _get_s3_client()
@@ -159,7 +166,7 @@ def upload_image_bytes(
     except ClientError:
         log.exception("put_object failed key=%s", key)
         raise
-    return {'url': _presigned_get_url(key), 'object_key': key}
+    return {'url': gated_public_media_url(key, viewer_user_id=user_id), 'object_key': key}
 
 
 def download_object_bytes(object_key: str) -> bytes | None:
@@ -246,7 +253,7 @@ def build_processed_images(
     user_id: str = '',
     conversation_id: str | None = None,
 ) -> list[dict]:
-    """Deduplicate and compress uploaded images; 配置 S3 时写入对象存储并返回预签名 URL。"""
+    """Deduplicate and compress uploaded images; 配置 S3 时写入对象存储并返回同源 /api/media URL。"""
     processed: list[dict] = []
     seen_hashes: set[str] = set()
 
@@ -307,8 +314,12 @@ def build_processed_images(
     return processed
 
 
-def rewrite_content_image_refs(content: Any) -> Any:
-    """为消息中的 object_key 刷新预签名 URL（深拷贝式改写）。"""
+def rewrite_content_image_refs(
+    content: Any,
+    *,
+    viewer_user_id: str | None = None,
+) -> Any:
+    """为消息中的 object_key 刷新同源 /api/media URL（深拷贝式改写）。"""
     if isinstance(content, str):
         raw = content.strip()
         if raw.startswith('[{'):
@@ -317,30 +328,42 @@ def rewrite_content_image_refs(content: Any) -> Any:
             except (json.JSONDecodeError, TypeError, ValueError):
                 parsed = None
             if isinstance(parsed, list):
-                return rewrite_content_image_refs(parsed)
+                return rewrite_content_image_refs(parsed, viewer_user_id=viewer_user_id)
         return content
     if isinstance(content, list):
-        return [rewrite_content_image_refs(x) for x in content]
+        return [
+            rewrite_content_image_refs(x, viewer_user_id=viewer_user_id) for x in content
+        ]
     if isinstance(content, dict):
         if content.get('type') == 'image' and content.get('object_key'):
             key = content['object_key']
             if isinstance(key, str) and key and is_s3_configured():
-                url = _presigned_get_url(key)
+                url = gated_public_media_url(key, viewer_user_id=viewer_user_id)
                 if url:
                     out = dict(content)
                     out['url'] = url
                     return out
-        return {k: rewrite_content_image_refs(v) for k, v in content.items()}
+        return {
+            k: rewrite_content_image_refs(v, viewer_user_id=viewer_user_id)
+            for k, v in content.items()
+        }
     return content
 
 
-def hydrate_messages_for_client(messages: list[dict]) -> list[dict]:
+def hydrate_messages_for_client(
+    messages: list[dict],
+    *,
+    viewer_user_id: str | None = None,
+) -> list[dict]:
     out = []
     for m in messages:
         if not isinstance(m, dict):
             out.append(m)
             continue
         mm = dict(m)
-        mm['content'] = rewrite_content_image_refs(m.get('content'))
+        mm['content'] = rewrite_content_image_refs(
+            m.get('content'),
+            viewer_user_id=viewer_user_id,
+        )
         out.append(mm)
     return out

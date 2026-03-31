@@ -56,7 +56,10 @@ def get_conversations():
             lm = s.get('last_message')
             if isinstance(lm, dict):
                 lm = dict(lm)
-                lm['content'] = image_service.rewrite_content_image_refs(lm.get('content'))
+                lm['content'] = image_service.rewrite_content_image_refs(
+                    lm.get('content'),
+                    viewer_user_id=user_id,
+                )
                 s['last_message'] = lm
             hydrated[cid] = s
         return jsonify({
@@ -72,7 +75,19 @@ def get_conversations():
 @limiter.limit('120 per minute')
 def get_conversation(conversation_id):
     try:
-        conv = store.get(conversation_id)
+        msg_limit = request.args.get('message_limit', type=int)
+        if msg_limit is not None and (msg_limit < 1 or msg_limit > 200):
+            return jsonify({'error': 'Invalid message_limit'}), 400
+
+        before_mid = request.args.get('before_message_id', type=int)
+        if before_mid is not None and before_mid < 1:
+            return jsonify({'error': 'Invalid before_message_id'}), 400
+
+        conv = store.get(
+            conversation_id,
+            message_limit=msg_limit,
+            before_message_id=before_mid,
+        )
         if not conv:
             return jsonify({'error': 'Conversation not found'}), 404
 
@@ -80,7 +95,10 @@ def get_conversation(conversation_id):
         if denied:
             return denied
 
-        messages = image_service.hydrate_messages_for_client(conv['messages'])
+        messages = image_service.hydrate_messages_for_client(
+            conv['messages'],
+            viewer_user_id=conv.get('user_id'),
+        )
         return jsonify({
             'success': True,
             'id': conversation_id,
@@ -89,6 +107,9 @@ def get_conversation(conversation_id):
             'source_id': conv.get('source_id', ''),
             'source_name': conv.get('source_name', ''),
             'dify_title': (conv.get('dify_conversation_name') or '').strip(),
+            'messages_truncated': bool(conv.get('messages_truncated')),
+            'message_count_total': int(conv.get('message_count_total') or len(messages)),
+            'has_more_older': bool(conv.get('has_more_older')),
         }), 200
     except Exception:
         log.exception("get_conversation failed")
