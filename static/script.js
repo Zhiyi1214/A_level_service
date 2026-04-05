@@ -791,6 +791,32 @@ function sanitizeAssistantHtml(purify, html) {
     });
 }
 
+/** 根级 table 外包一层，便于窄屏横向滚动且与格子样式一致 */
+function wrapAssistantTables(html) {
+    if (!html || typeof html !== 'string' || !/<table[\s>]/i.test(html)) {
+        return html;
+    }
+    try {
+        const tpl = document.createElement('template');
+        tpl.innerHTML = html.trim();
+        const frag = tpl.content;
+        const top = Array.from(frag.childNodes);
+        for (const node of top) {
+            if (node.nodeType === 1 && node.tagName === 'TABLE') {
+                const wrap = document.createElement('div');
+                wrap.className = 'table-scroll';
+                frag.insertBefore(wrap, node);
+                wrap.appendChild(node);
+            }
+        }
+        const out = document.createElement('div');
+        out.appendChild(frag);
+        return out.innerHTML;
+    } catch (e) {
+        return html;
+    }
+}
+
 /**
  * 仅剥 JSON 字符串壳（首尾引号 + JSON.parse），不做 \\n/\\t 替换，以免破坏 LaTeX（如 \\text、\\right）。
  */
@@ -1063,7 +1089,8 @@ function renderAssistantMarkdown(text) {
             return d.innerHTML;
         }
         html = assistantRestoreBracketMathPlaceholders(String(html), bracket.mathEntries);
-        return sanitizeAssistantHtml(purify, html);
+        html = sanitizeAssistantHtml(purify, html);
+        return wrapAssistantTables(html);
     } catch (e) {
         console.error('Markdown render failed:', e);
         const d = document.createElement('div');

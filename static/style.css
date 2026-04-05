@@ -1648,6 +1648,59 @@ body[data-theme="light"] .shell-rail-btn:hover {
     color: var(--primary-color);
 }
 
+/* GFM 表格：单元格边框 + 表头底纹；外包 .table-scroll 便于横向滚动 */
+.message-bubble-md .table-scroll {
+    margin: 0.65em 0;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    background: var(--code-bg);
+}
+
+.message-bubble-md .table-scroll table {
+    margin: 0;
+    width: max-content;
+    min-width: 100%;
+    border-collapse: collapse;
+    font-size: 0.96em;
+    background: transparent;
+}
+
+.message-bubble-md table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.96em;
+    margin: 0.65em 0;
+}
+
+.message-bubble-md th,
+.message-bubble-md td {
+    border: 1px solid var(--border-color);
+    padding: 8px 11px;
+    vertical-align: top;
+    text-align: left;
+}
+
+.message-bubble-md thead th {
+    background: var(--bg-soft);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+body[data-theme="dark"] .message-bubble-md thead th {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.message-bubble-md tbody tr:nth-child(even) td {
+    background: rgba(127, 127, 127, 0.05);
+}
+
+body[data-theme="dark"] .message-bubble-md tbody tr:nth-child(even) td {
+    background: rgba(255, 255, 255, 0.03);
+}
+
 .message-bubble-md .md-block + .message-image,
 .message-bubble-md .message-image {
     margin-top: 10px;

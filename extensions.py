@@ -40,7 +40,7 @@ def init_extensions(app):
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
         'pool_size': 10,
-        'max_overflow': 20,
+        'max_overflow': 15,
         'pool_recycle': 3600,
         'pool_pre_ping': True,
     }
