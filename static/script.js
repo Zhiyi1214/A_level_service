@@ -64,6 +64,10 @@ const SIDEBAR_COLLAPSED_STORAGE_KEY = 'a_level_sidebar_collapsed_v46';
 const MAX_UPLOAD_IMAGES = 3;
 /** 会话详情首次加载与「加载更早」时每页条数 */
 const CONVERSATION_MESSAGE_PAGE_SIZE = 8;
+/** 会话详情 localStorage 缓存：TTL 内再次点开同一会话可跳过 GET，减轻服务端压力 */
+const CONVERSATION_DETAIL_CACHE_STORAGE_KEY = 'a_level_conv_detail_cache_v1';
+const CONVERSATION_DETAIL_CACHE_TTL_MS = 5 * 60 * 1000;
+const CONVERSATION_DETAIL_CACHE_MAX_ENTRIES = 40;
 const conversationStates = new Map();
 
 function getConversationState(conversationId) {
@@ -250,6 +254,7 @@ async function logoutAuth() {
         console.warn('logout failed:', e);
     }
     conversationStates.clear();
+    clearAllConversationDetailCaches();
     authUser = null;
     currentConversationId = null;
     selectedSourceId = '';
@@ -277,6 +282,122 @@ function setConversationServerData(conversationId, conv) {
                 ? conv.message_count_total
                 : null
     };
+}
+
+function readConversationDetailCacheRoot() {
+    try {
+        const raw = localStorage.getItem(CONVERSATION_DETAIL_CACHE_STORAGE_KEY);
+        if (!raw) {
+            return { entries: {}, order: [] };
+        }
+        const o = JSON.parse(raw);
+        if (!o || typeof o !== 'object') {
+            return { entries: {}, order: [] };
+        }
+        return {
+            entries: o.entries && typeof o.entries === 'object' ? o.entries : {},
+            order: Array.isArray(o.order) ? o.order : []
+        };
+    } catch {
+        return { entries: {}, order: [] };
+    }
+}
+
+function writeConversationDetailCacheRoot(root) {
+    try {
+        localStorage.setItem(CONVERSATION_DETAIL_CACHE_STORAGE_KEY, JSON.stringify(root));
+    } catch (e) {
+        console.warn('conversation cache write failed:', e);
+        if (root && root.order && root.order.length > 1) {
+            const half = Math.floor(root.order.length / 2);
+            for (let i = 0; i < half; i++) {
+                const id = root.order[i];
+                if (id && root.entries[id]) {
+                    delete root.entries[id];
+                }
+            }
+            root.order = root.order.slice(half);
+            try {
+                localStorage.setItem(CONVERSATION_DETAIL_CACHE_STORAGE_KEY, JSON.stringify(root));
+            } catch (e2) {
+                console.warn('conversation cache shrink failed:', e2);
+            }
+        }
+    }
+}
+
+function getConversationDetailCache(conversationId) {
+    if (!conversationId) {
+        return null;
+    }
+    const root = readConversationDetailCacheRoot();
+    const e = root.entries[conversationId];
+    if (!e || typeof e.savedAt !== 'number' || !e.data || typeof e.data !== 'object') {
+        return null;
+    }
+    return { savedAt: e.savedAt, data: e.data };
+}
+
+function setConversationDetailCache(conversationId, apiData) {
+    if (!conversationId || !apiData || typeof apiData !== 'object') {
+        return;
+    }
+    const root = readConversationDetailCacheRoot();
+    root.entries[conversationId] = { savedAt: Date.now(), data: apiData };
+    root.order = root.order.filter(id => id !== conversationId);
+    root.order.push(conversationId);
+    while (root.order.length > CONVERSATION_DETAIL_CACHE_MAX_ENTRIES) {
+        const evict = root.order.shift();
+        if (evict && root.entries[evict]) {
+            delete root.entries[evict];
+        }
+    }
+    writeConversationDetailCacheRoot(root);
+}
+
+function removeConversationDetailCache(conversationId) {
+    if (!conversationId) {
+        return;
+    }
+    const root = readConversationDetailCacheRoot();
+    if (!root.entries[conversationId]) {
+        return;
+    }
+    delete root.entries[conversationId];
+    root.order = root.order.filter(id => id !== conversationId);
+    writeConversationDetailCacheRoot(root);
+}
+
+function clearAllConversationDetailCaches() {
+    try {
+        localStorage.removeItem(CONVERSATION_DETAIL_CACHE_STORAGE_KEY);
+    } catch (e) {
+        console.warn('conversation cache clear failed:', e);
+    }
+}
+
+/** 将当前内存中的会话详情写回 localStorage（加载更早消息后等） */
+function persistConversationDetailCacheFromState(conversationId) {
+    const state = getConversationState(conversationId);
+    if (!state || !state.serverConversation) {
+        return;
+    }
+    const sc = state.serverConversation;
+    setConversationDetailCache(conversationId, {
+        success: true,
+        id: conversationId,
+        created_at: sc.created_at || '',
+        messages: Array.isArray(sc.messages) ? sc.messages : [],
+        source_id: sc.source_id || '',
+        source_name: sc.source_name || '',
+        dify_title: sc.dify_title || '',
+        messages_truncated: false,
+        message_count_total:
+            sc.message_count_total != null
+                ? sc.message_count_total
+                : (Array.isArray(sc.messages) ? sc.messages.length : 0),
+        has_more_older: !!sc.has_more_older
+    });
 }
 
 function getOldestServerMessageId(conversationId) {
@@ -1550,6 +1671,7 @@ async function loadOlderConversationMessages(conversationId) {
         if (typeof data.message_count_total === 'number') {
             state.serverConversation.message_count_total = data.message_count_total;
         }
+        persistConversationDetailCacheFromState(conversationId);
     } catch (e) {
         console.error('loadOlderConversationMessages:', e);
     } finally {
@@ -1568,10 +1690,34 @@ async function switchConversation(conversationId) {
     setSourceLocked(true);
     closeSidebar();
 
+    const cached = getConversationDetailCache(conversationId);
+    const now = Date.now();
+    const cacheFresh = !!(cached && now - cached.savedAt < CONVERSATION_DETAIL_CACHE_TTL_MS);
+
+    if (cacheFresh && cached) {
+        const st = getConversationState(conversationId);
+        if (st) {
+            st.loadingOlderMessages = false;
+        }
+        setConversationServerData(conversationId, cached.data);
+        uploadedFiles = [];
+        resetComposer();
+        if (cached.data.source_id) {
+            selectedSourceId = cached.data.source_id;
+            renderSourceOptions();
+        }
+        setSourceLocked(true);
+        renderConversationView(conversationId);
+        updateCurrentSourceTitle();
+        return;
+    }
+
     const state = getConversationState(conversationId);
     if (state) {
         state.loadingOlderMessages = false;
-        if (state.serverConversation) {
+        if (cached) {
+            setConversationServerData(conversationId, cached.data);
+        } else if (state.serverConversation) {
             state.serverConversation = {
                 ...state.serverConversation,
                 messages: [],
@@ -1595,6 +1741,9 @@ async function switchConversation(conversationId) {
             { credentials: 'same-origin' }
         );
         if (!response.ok) {
+            if (response.status === 404) {
+                removeConversationDetailCache(conversationId);
+            }
             console.error('Error loading conversation: HTTP', response.status);
             renderConversationView(conversationId);
             return;
@@ -1612,6 +1761,7 @@ async function switchConversation(conversationId) {
             : null;
 
         setConversationServerData(conversationId, data);
+        setConversationDetailCache(conversationId, data);
         uploadedFiles = [];
         resetComposer();
         if (data.source_id) {
@@ -1681,6 +1831,7 @@ async function deleteConversation(conversationId, event) {
         );
         
         if (response.ok) {
+            removeConversationDetailCache(conversationId);
             if (currentConversationId === conversationId) {
                 startNewChat();
             } else {
@@ -1972,6 +2123,7 @@ async function refreshConversationFromServer(conversationId, options = {}) {
             return;
         }
         setConversationServerData(conversationId, data);
+        setConversationDetailCache(conversationId, data);
         if (currentConversationId === conversationId) {
             if (!skipViewRender) {
                 renderConversationView(conversationId);
@@ -2465,14 +2617,10 @@ function toggleDesktopSidebar() {
 }
 
 function toggleSidebar() {
-    if (isMobileViewport()) {
-        const sidebar = document.querySelector('.sidebar');
-        const nextOpen = !(sidebar && sidebar.classList.contains('show'));
-        if (sidebar) {
-            sidebar.classList.toggle('show', nextOpen);
-        }
-        syncSidebarButtons();
-        return;
+    const sidebar = document.querySelector('.sidebar');
+    const nextOpen = !(sidebar && sidebar.classList.contains('show'));
+    if (sidebar) {
+        sidebar.classList.toggle('show', nextOpen);
     }
-    setDesktopSidebarCollapsed(!isDesktopSidebarCollapsed());
+    syncSidebarButtons();
 }

@@ -164,22 +164,6 @@ def upload_image_bytes(
     return {'url': gated_public_media_url(key, viewer_user_id=user_id), 'object_key': key}
 
 
-def download_object_bytes(object_key: str) -> bytes | None:
-    """按 Object Key 从已配置的桶读取对象体（例如从仅含 key 的 Redis 缓存再水合为上传用字节）。"""
-    key = (object_key or '').strip()
-    if not key or not is_s3_configured():
-        return None
-    client = _get_s3_client()
-    if not client:
-        return None
-    try:
-        resp = client.get_object(Bucket=settings.S3_BUCKET, Key=key)
-        return resp['Body'].read()
-    except ClientError:
-        log.exception("get_object failed key=%s", key)
-        return None
-
-
 def compress(filename: str, raw_bytes: bytes) -> tuple[str, str, bytes]:
     """Resize / compress a single image before upstream upload."""
     suffix = Path(filename).suffix.lower()
