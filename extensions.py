@@ -54,7 +54,7 @@ def init_extensions(app):
             'allow_headers': ['Content-Type', 'Authorization', 'X-Requested-With'],
         }
         # 带 Cookie 的跨域请求不能与 origins=* 同时使用；且 * 时勿与自定义头 CSRF 缓解假定为安全组合
-        if settings.OAUTH_CONFIGURED and not _cors_has_wildcard:
+        if settings.AUTH_CONFIGURED and not _cors_has_wildcard:
             _cors_kwargs['supports_credentials'] = True
         if _cors_has_wildcard and _cors_kwargs.get('supports_credentials'):
             raise RuntimeError('CORS origins 含 * 时不应启用 supports_credentials')

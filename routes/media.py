@@ -31,7 +31,7 @@ def get_object(object_key: str):
         return jsonify({'error': 'Not found'}), 404
 
     viewer = effective_user_id()
-    if settings.OAUTH_CONFIGURED:
+    if settings.AUTH_CONFIGURED:
         if not viewer:
             return oauth_login_required_response()
 

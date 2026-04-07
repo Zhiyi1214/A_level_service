@@ -166,6 +166,29 @@ GOOGLE_CLIENT_SECRET = (os.getenv('GOOGLE_CLIENT_SECRET') or '').strip()
 GOOGLE_REDIRECT_URI_EXPLICIT = (os.getenv('GOOGLE_REDIRECT_URI') or '').strip()
 OAUTH_CONFIGURED = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 
+# ---------------------------------------------------------------------------
+# 邮箱验证码登录（SMTP 发信；与 Google 可同时启用）
+# ---------------------------------------------------------------------------
+SMTP_HOST = (os.getenv('SMTP_HOST') or '').strip()
+SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
+SMTP_USER = (os.getenv('SMTP_USER') or '').strip()
+SMTP_PASSWORD = (os.getenv('SMTP_PASSWORD') or '').strip()
+SMTP_USE_TLS = (os.getenv('SMTP_USE_TLS', 'true') or '').strip().lower() in (
+    '1',
+    'true',
+    'yes',
+)
+SMTP_FROM = (os.getenv('SMTP_FROM') or SMTP_USER or '').strip()
+EMAIL_LOGIN_CODE_TTL_MINUTES = int(os.getenv('EMAIL_LOGIN_CODE_TTL_MINUTES', '10'))
+# 无认证 SMTP（如本机 MailHog）时 SMTP_USER 可留空；有密码时通常需同时配用户名
+EMAIL_AUTH_CONFIGURED = bool(
+    SMTP_HOST
+    and SMTP_FROM
+    and (SMTP_PASSWORD or not SMTP_USER)
+)
+
+AUTH_CONFIGURED = OAUTH_CONFIGURED or EMAIL_AUTH_CONFIGURED
+
 # 生产环境 HTTPS 下建议设为 true，否则浏览器可能不发送 Session Cookie
 SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', '').lower() in (
     '1',

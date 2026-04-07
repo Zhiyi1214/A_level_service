@@ -99,7 +99,7 @@ def create_session():
         data = request.get_json(silent=True, force=False) or {}
         source_id = (data.get('source_id') or '').strip()
         user_id = effective_user_id()
-        if settings.OAUTH_CONFIGURED and not user_id:
+        if settings.AUTH_CONFIGURED and not user_id:
             return oauth_login_required_response()
 
         source = source_service.get(source_id)
@@ -140,7 +140,7 @@ def chat():
             source_id = (request.form.get('source_id') or '').strip()
 
         user_id = effective_user_id()
-        if settings.OAUTH_CONFIGURED and not user_id:
+        if settings.AUTH_CONFIGURED and not user_id:
             return oauth_login_required_response()
 
         if not conversation_id:

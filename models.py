@@ -86,3 +86,15 @@ class UserIdentity(db.Model):
     __table_args__ = (
         db.UniqueConstraint('provider', 'provider_subject', name='uq_user_identity_provider_subject'),
     )
+
+
+class EmailLoginChallenge(db.Model):
+    """邮箱登录验证码（短期有效，用完即删）。"""
+
+    __tablename__ = 'email_login_challenges'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    email = db.Column(db.Text, nullable=False, index=True)
+    code_hash = db.Column(db.Text, nullable=False)
+    expires_at = db.Column(db.DateTime(timezone=True), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False)

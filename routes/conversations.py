@@ -17,7 +17,7 @@ conversations_bp = Blueprint('conversations', __name__)
 def _conversation_access_denied(conv):
     """若当前请求无权访问该会话，返回 (jsonify, status)；否则 None。"""
     uid = effective_user_id()
-    if settings.OAUTH_CONFIGURED and not uid:
+    if settings.AUTH_CONFIGURED and not uid:
         return oauth_login_required_response()
     if conv.get('user_id') and uid != conv['user_id']:
         return jsonify({'error': 'Forbidden'}), 403
@@ -29,7 +29,7 @@ def _conversation_access_denied(conv):
 def get_conversations():
     try:
         user_id = effective_user_id()
-        if settings.OAUTH_CONFIGURED and not user_id:
+        if settings.AUTH_CONFIGURED and not user_id:
             return oauth_login_required_response()
         raw = store.list_by_user(user_id)
         try:

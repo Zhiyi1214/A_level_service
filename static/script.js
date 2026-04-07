@@ -2,6 +2,9 @@
 let currentConversationId = null;
 let uploadedFiles = [];
 let oauthConfigured = false;
+let emailAuthConfigured = false;
+/** 任一登录方式（Google 或邮箱验证码）已启用 */
+let authConfigured = false;
 let authUser = null;
 let loginBrandRotateTimer = null;
 const LOGIN_BRAND_ROTATE_MS = 2400;
@@ -41,7 +44,6 @@ function stopLoginBrandRotate() {
         });
     }
 }
-let lastEnterDownMs = 0;
 let sendBtnDefaultHtml = '';
 let availableSources = [];
 let selectedSourceId = '';
@@ -119,18 +121,120 @@ async function initAuth() {
     const authStatus = getOAuthReturnStatus();
     try {
         await refreshAuthState();
-        if (authStatus === 'ok' && oauthConfigured && !authUser) {
+        if (authStatus === 'ok' && authConfigured && !authUser) {
             await new Promise(resolve => window.setTimeout(resolve, 250));
             await refreshAuthState();
         }
     } catch (e) {
         console.warn('initAuth failed:', e);
         oauthConfigured = false;
+        emailAuthConfigured = false;
+        authConfigured = false;
         authUser = null;
     }
     applyAuthView(authStatus);
+    applyLoginProvidersVisibility();
+    initLoginEmailBlock();
     renderAuthPanel();
     consumeOAuthReturnStatus(authStatus);
+}
+
+function initLoginEmailBlock() {
+    const sendBtn = document.getElementById('loginEmailSendBtn');
+    const verifyBtn = document.getElementById('loginEmailVerifyBtn');
+    if (sendBtn && !sendBtn.dataset.wired) {
+        sendBtn.dataset.wired = '1';
+        sendBtn.addEventListener('click', requestEmailLoginCode);
+    }
+    if (verifyBtn && !verifyBtn.dataset.wired) {
+        verifyBtn.dataset.wired = '1';
+        verifyBtn.addEventListener('click', verifyEmailLogin);
+    }
+}
+
+async function requestEmailLoginCode() {
+    const emailInput = document.getElementById('loginEmailInput');
+    const msg = document.getElementById('loginEmailMessage');
+    const email = emailInput ? (emailInput.value || '').trim() : '';
+    if (!email) {
+        if (msg) {
+            msg.textContent = '请输入邮箱';
+            msg.classList.remove('login-screen-message--hidden');
+        }
+        return;
+    }
+    if (msg) {
+        msg.classList.add('login-screen-message--hidden');
+    }
+    try {
+        const response = await fetch('/api/auth/email/request', withAjaxHeaders({
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ email })
+        }));
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            if (msg) {
+                msg.textContent = data.error === 'invalid email' ? '邮箱格式不正确' : '发送失败，请稍后重试';
+                msg.classList.remove('login-screen-message--hidden');
+            }
+            return;
+        }
+        if (msg) {
+            msg.textContent = '验证码已发送至邮箱，请查收';
+            msg.classList.remove('login-screen-message--hidden');
+        }
+    } catch (e) {
+        if (msg) {
+            msg.textContent = '发送失败，请检查网络';
+            msg.classList.remove('login-screen-message--hidden');
+        }
+    }
+}
+
+async function verifyEmailLogin() {
+    const emailInput = document.getElementById('loginEmailInput');
+    const codeInput = document.getElementById('loginEmailCodeInput');
+    const msg = document.getElementById('loginEmailMessage');
+    const email = emailInput ? (emailInput.value || '').trim() : '';
+    const code = codeInput ? (codeInput.value || '').trim() : '';
+    if (!email || !code) {
+        if (msg) {
+            msg.textContent = '请输入邮箱与 6 位验证码';
+            msg.classList.remove('login-screen-message--hidden');
+        }
+        return;
+    }
+    try {
+        const response = await fetch('/api/auth/email/verify', withAjaxHeaders({
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ email, code })
+        }));
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            if (msg) {
+                msg.textContent = response.status === 401 ? '验证码错误或已过期' : '登录失败，请重试';
+                msg.classList.remove('login-screen-message--hidden');
+            }
+            return;
+        }
+        if (msg) {
+            msg.classList.add('login-screen-message--hidden');
+            msg.textContent = '';
+        }
+        await refreshAuthState();
+        applyAuthView('');
+        renderAuthPanel();
+        loadConversations();
+    } catch (e) {
+        if (msg) {
+            msg.textContent = '登录失败，请检查网络';
+            msg.classList.remove('login-screen-message--hidden');
+        }
+    }
 }
 
 async function refreshAuthState() {
@@ -143,6 +247,11 @@ async function refreshAuthState() {
     });
     const data = await response.json();
     oauthConfigured = !!data.oauth_configured;
+    emailAuthConfigured = !!data.email_auth_configured;
+    authConfigured = !!data.auth_configured;
+    if (data.auth_configured === undefined) {
+        authConfigured = oauthConfigured || emailAuthConfigured;
+    }
     authUser = data.authenticated && data.user ? data.user : null;
 }
 
@@ -152,7 +261,18 @@ function getOAuthReturnStatus() {
 }
 
 function isAuthGateActive() {
-    return oauthConfigured && !authUser;
+    return authConfigured && !authUser;
+}
+
+function applyLoginProvidersVisibility() {
+    const googleBtn = document.getElementById('loginScreenGoogleBtn');
+    const emailBlock = document.getElementById('loginScreenEmailBlock');
+    if (googleBtn) {
+        googleBtn.classList.toggle('login-auth-hidden', !oauthConfigured);
+    }
+    if (emailBlock) {
+        emailBlock.classList.toggle('login-auth-hidden', !emailAuthConfigured);
+    }
 }
 
 function applyAuthView(authStatus = '') {
@@ -180,7 +300,7 @@ function applyAuthView(authStatus = '') {
         if (authStatus === 'ok' && gateActive) {
             message = '登录回调已完成，但当前会话未生效。';
         } else if (authStatus === 'error') {
-            message = 'Google 登录失败，请重试。';
+            message = oauthConfigured ? 'Google 登录失败，请重试。' : '登录失败，请重试。';
         }
         loginMessage.textContent = message;
         loginMessage.classList.toggle('login-screen-message--hidden', !message);
@@ -208,7 +328,7 @@ function renderAuthPanel() {
         return;
     }
     panel.classList.remove('auth-panel--login-cta', 'auth-panel--user-state');
-    if (!oauthConfigured || !authUser) {
+    if (!authConfigured || !authUser) {
         panel.innerHTML = '';
         panel.classList.add('auth-panel--hidden');
         applyComposerDockLayout();
@@ -736,8 +856,8 @@ document.addEventListener('DOMContentLoaded', async function() {
     if (sb) {
         sendBtnDefaultHtml = sb.innerHTML;
     }
-    await initAuth();
     initTheme();
+    await initAuth();
     initSidebarState();
     syncSendBtn();
     setupEventListeners();
@@ -752,15 +872,20 @@ function renderMessagesLoadingPlaceholder() {
     return '<div class="messages-area-loading" role="status">加载会话…</div>';
 }
 
+/** 与 Unicode ☀/☾ 不同：iOS 会把后者画成彩色 emoji；SVG 用 currentColor 全平台一致 */
+const THEME_ICON_SUN_SVG =
+    '<svg class="theme-toggle-svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32l1.41-1.41"/></svg>';
+const THEME_ICON_MOON_SVG =
+    '<svg class="theme-toggle-svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+
 function applyTheme(theme) {
     const body = document.body;
     if (!body) return;
     const nextTheme = theme === 'light' ? 'light' : 'dark';
     body.setAttribute('data-theme', nextTheme);
-    const toggleIcon = document.querySelector('.theme-toggle-icon');
-    if (toggleIcon) {
-        toggleIcon.textContent = nextTheme === 'dark' ? '☀' : '☾';
-    }
+    document.querySelectorAll('.theme-toggle-icon').forEach((toggleIcon) => {
+        toggleIcon.innerHTML = nextTheme === 'dark' ? THEME_ICON_SUN_SVG : THEME_ICON_MOON_SVG;
+    });
     try {
         localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
     } catch (e) {
@@ -1238,7 +1363,7 @@ function syncSendBtn() {
         btn.onclick = function () {
             sendMessage();
         };
-        btn.title = '发送（连续按两次 Enter 也可发送）';
+        btn.title = '发送';
         btn.setAttribute('aria-label', '发送');
     }
 }
@@ -1285,6 +1410,7 @@ function setupEventListeners() {
         queueUploadedFiles(imageFiles, { fromClipboard: true });
     });
 
+    const mainChrome = document.querySelector('.main-chrome');
     document.addEventListener('click', function(event) {
         if (!isMobileViewport() || !isSidebarOpen() || !sidebar) {
             return;
@@ -1292,6 +1418,7 @@ function setupEventListeners() {
         if (
             sidebar.contains(event.target)
             || (shellRail && shellRail.contains(event.target))
+            || (mainChrome && mainChrome.contains(event.target))
         ) {
             return;
         }
@@ -1441,8 +1568,8 @@ async function loadSources() {
 
 async function ensureSessionReady() {
     if (currentConversationId) return true;
-    if (oauthConfigured && !authUser) {
-        addMessageToUI('assistant', '❌ 请先使用侧栏的 Google 登录后再开始对话。');
+    if (authConfigured && !authUser) {
+        addMessageToUI('assistant', '❌ 请先登录后再开始对话。');
         return false;
     }
     if (!selectedSourceId) {
@@ -1525,7 +1652,7 @@ async function loadConversations() {
     }
     loadConversationsInFlight = (async () => {
         try {
-            if (oauthConfigured && !authUser) {
+            if (authConfigured && !authUser) {
                 const container = document.getElementById('conversationsList');
                 if (container) {
                     container.innerHTML = '';
@@ -1955,19 +2082,13 @@ function removeFileById(fileId) {
     if (tag) tag.remove();
 }
 
-// Handle input keydown：连续两次 Enter（约 0.52s 内）发送；Shift+Enter 换行
+// Enter 发送；Shift+Enter 换行（不拦截，交给浏览器默认插入换行）
 function handleInputKeydown(event) {
     if (event.key !== 'Enter' || event.shiftKey) {
         return;
     }
-    const now = Date.now();
-    if (now - lastEnterDownMs < 520) {
-        event.preventDefault();
-        lastEnterDownMs = 0;
-        sendMessage();
-        return;
-    }
-    lastEnterDownMs = now;
+    event.preventDefault();
+    sendMessage();
 }
 
 function buildUserMessageContent(message, files) {
@@ -2377,6 +2498,10 @@ function closeSidebar() {
     if (sidebar) {
         sidebar.classList.remove('show');
     }
+    const appContainer = document.querySelector('.app-container');
+    if (appContainer) {
+        appContainer.classList.remove('mobile-sidebar-open');
+    }
     syncSidebarButtons();
 }
 
@@ -2561,18 +2686,22 @@ function isDesktopSidebarCollapsed() {
 
 function syncSidebarButtons() {
     const collapseBtn = document.getElementById('sidebarCollapseBtn');
+    const collapseBtnMobile = document.getElementById('sidebarCollapseBtnMobile');
     const mobileOpen = isSidebarOpen();
     const desktopCollapsed = isDesktopSidebarCollapsed();
 
-    if (collapseBtn) {
+    const applyCollapseLabels = (btn) => {
+        if (!btn) return;
         if (isMobileViewport()) {
-            collapseBtn.title = mobileOpen ? '收起会话列表' : '打开会话列表';
-            collapseBtn.setAttribute('aria-label', collapseBtn.title);
+            btn.title = mobileOpen ? '收起会话列表' : '打开会话列表';
         } else {
-            collapseBtn.title = desktopCollapsed ? '展开侧边栏' : '收起侧边栏';
-            collapseBtn.setAttribute('aria-label', collapseBtn.title);
+            btn.title = desktopCollapsed ? '展开侧边栏' : '收起侧边栏';
         }
-    }
+        btn.setAttribute('aria-label', btn.title);
+    };
+
+    applyCollapseLabels(collapseBtn);
+    applyCollapseLabels(collapseBtnMobile);
 }
 
 function setDesktopSidebarCollapsed(collapsed, options = {}) {
@@ -2618,9 +2747,13 @@ function toggleDesktopSidebar() {
 
 function toggleSidebar() {
     const sidebar = document.querySelector('.sidebar');
+    const appContainer = document.querySelector('.app-container');
     const nextOpen = !(sidebar && sidebar.classList.contains('show'));
     if (sidebar) {
         sidebar.classList.toggle('show', nextOpen);
+    }
+    if (appContainer && isMobileViewport()) {
+        appContainer.classList.toggle('mobile-sidebar-open', nextOpen);
     }
     syncSidebarButtons();
 }

@@ -6,13 +6,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, insert, select
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import load_only, selectinload
 
 from config import settings
 from extensions import db
-from models import Conversation, Message, User, UserIdentity
+from models import Conversation, EmailLoginChallenge, Message, User, UserIdentity
 
 log = logging.getLogger(__name__)
 
@@ -501,3 +501,44 @@ class PostgresStore:
         raise RuntimeError(
             'upsert_user_from_provider: concurrent identity insert retry exhausted'
         )
+
+    def replace_email_login_challenge(
+        self,
+        email: str,
+        code_hash: str,
+        expires_at: datetime,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        db.session.execute(
+            delete(EmailLoginChallenge).where(EmailLoginChallenge.email == email)
+        )
+        db.session.add(
+            EmailLoginChallenge(
+                email=email,
+                code_hash=code_hash,
+                expires_at=expires_at,
+                created_at=now,
+            )
+        )
+        db.session.commit()
+
+    def verify_and_consume_email_login_code(self, email: str, code: str) -> bool:
+        import hmac
+
+        from services.email_auth import hash_login_code
+
+        now = datetime.now(timezone.utc)
+        row = db.session.scalar(
+            select(EmailLoginChallenge)
+            .where(EmailLoginChallenge.email == email)
+            .order_by(EmailLoginChallenge.created_at.desc())
+            .limit(1)
+        )
+        if row is None or row.expires_at < now:
+            return False
+        expect = hash_login_code(email, (code or '').strip())
+        if not hmac.compare_digest(row.code_hash, expect):
+            return False
+        db.session.delete(row)
+        db.session.commit()
+        return True

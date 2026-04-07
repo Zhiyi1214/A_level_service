@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, shrink-to-fit=no">
     <title>AI Assistant - Powered by Dify</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -33,11 +33,18 @@
             <div class="login-screen-actions">
                 <p id="loginScreenMessage" class="login-screen-message login-screen-message--hidden"></p>
                 <div class="login-screen-button-stack" role="group" aria-label="登录方式">
-                    <a id="loginScreenGoogleBtn" class="sidebar-capsule sidebar-capsule--auth sidebar-capsule--clickable auth-google-capsule auth-google-capsule--hero login-screen-oauth-btn" href="/auth/google">
+                    <a id="loginScreenGoogleBtn" class="sidebar-capsule sidebar-capsule--auth sidebar-capsule--clickable auth-google-capsule auth-google-capsule--hero login-screen-oauth-btn login-auth-hidden" href="/auth/google">
                         <span class="auth-google-capsule-label">Google 登录</span>
                     </a>
-                    <button type="button" class="login-screen-btn" disabled title="登录渠道尚未接入">方式二（即将开放）</button>
-                    <button type="button" class="login-screen-btn" disabled title="登录渠道尚未接入">方式三（即将开放）</button>
+                    <div id="loginScreenEmailBlock" class="login-screen-email-block login-auth-hidden" aria-label="邮箱验证码登录">
+                        <input type="email" id="loginEmailInput" class="login-screen-input" placeholder="邮箱" autocomplete="email" inputmode="email" />
+                        <div class="login-screen-email-row">
+                            <button type="button" id="loginEmailSendBtn" class="login-screen-btn login-screen-btn--primary">发送验证码</button>
+                        </div>
+                        <input type="text" id="loginEmailCodeInput" class="login-screen-input" placeholder="6 位验证码" inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
+                        <button type="button" id="loginEmailVerifyBtn" class="login-screen-btn">邮箱登录</button>
+                        <p id="loginEmailMessage" class="login-screen-email-message login-screen-message--hidden"></p>
+                    </div>
                 </div>
             </div>
         </div>
@@ -55,7 +62,7 @@
                         <span class="shell-rail-plus">+</span>
                     </button>
                     <button class="shell-rail-btn theme-toggle-rail-btn" id="themeToggleBtn" type="button" onclick="toggleTheme()" title="切换主题" aria-label="切换主题">
-                        <span class="theme-toggle-icon">☀</span>
+                        <span class="theme-toggle-icon" aria-hidden="true"></span>
                     </button>
                 </div>
 
@@ -75,6 +82,19 @@
 
         <main class="main-content">
             <header class="main-chrome">
+                <button class="shell-rail-btn main-chrome-rail-toggle" id="sidebarCollapseBtnMobile" type="button" onclick="toggleDesktopSidebar()" title="打开会话列表" aria-label="打开会话列表">
+                    <svg class="shell-rail-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                        <path d="M15 18l-6-6 6-6"></path>
+                    </svg>
+                </button>
+                <div class="main-chrome-rail-trailing" aria-label="快捷操作">
+                    <button class="shell-rail-btn shell-rail-btn--accent" type="button" onclick="startNewChat()" title="新对话" aria-label="新对话">
+                        <span class="shell-rail-plus">+</span>
+                    </button>
+                    <button class="shell-rail-btn theme-toggle-rail-btn" type="button" onclick="toggleTheme()" title="切换主题" aria-label="切换主题">
+                        <span class="theme-toggle-icon" aria-hidden="true"></span>
+                    </button>
+                </div>
                 <div class="main-chrome-brand">
                     <div class="logo logo--compact logo--header-brand" aria-label="A Level Assistant">
                         <span class="app-brand-mark app-brand-mark--header" aria-hidden="true">
@@ -109,7 +129,7 @@
                         <textarea
                             id="messageInput"
                             class="message-input"
-                            placeholder="输入问题… (Shift+Enter 换行，连按两次 Enter 发送)"
+                            placeholder="请输入问题"
                             onkeydown="handleInputKeydown(event)"
                             rows="1"
                         ></textarea>

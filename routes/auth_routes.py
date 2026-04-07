@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timedelta, timezone
 
 import requests
 from flask import Blueprint, jsonify, redirect, request, session, url_for
@@ -6,6 +7,13 @@ from flask import Blueprint, jsonify, redirect, request, session, url_for
 from auth.context import SESSION_USER_KEY
 from config import settings
 from extensions import limiter, oauth
+from services.email_auth import (
+    generate_six_digit_code,
+    hash_login_code,
+    is_valid_email_shape,
+    normalize_email,
+    send_login_code_email,
+)
 from storage import store
 
 log = logging.getLogger(__name__)
@@ -29,10 +37,12 @@ def _auth_status_redirect(status: str):
 def api_me():
     payload = {
         'oauth_configured': settings.OAUTH_CONFIGURED,
+        'email_auth_configured': settings.EMAIL_AUTH_CONFIGURED,
+        'auth_configured': settings.AUTH_CONFIGURED,
         'authenticated': False,
         'user': None,
     }
-    if not settings.OAUTH_CONFIGURED:
+    if not settings.AUTH_CONFIGURED:
         return jsonify(payload), 200
 
     uid = session.get(SESSION_USER_KEY)
@@ -115,4 +125,54 @@ def google_callback():
 @auth_bp.route('/auth/logout', methods=['POST'])
 def logout():
     session.pop(SESSION_USER_KEY, None)
+    return jsonify({'success': True}), 200
+
+
+@auth_bp.route('/api/auth/email/request', methods=['POST'])
+@limiter.limit('30 per hour')
+def email_login_request():
+    if not settings.EMAIL_AUTH_CONFIGURED:
+        return jsonify({'error': 'email login is not configured on this server'}), 503
+    data = request.get_json(silent=True, force=False) or {}
+    email = normalize_email(data.get('email') or '')
+    if not is_valid_email_shape(email):
+        return jsonify({'error': 'invalid email'}), 400
+    code = generate_six_digit_code()
+    code_hash = hash_login_code(email, code)
+    ttl = max(1, settings.EMAIL_LOGIN_CODE_TTL_MINUTES)
+    expires = datetime.now(timezone.utc) + timedelta(minutes=ttl)
+    try:
+        store.replace_email_login_challenge(email, code_hash, expires)
+        send_login_code_email(email, code)
+    except Exception:
+        log.exception('email_login_request failed')
+        return jsonify({'error': 'send failed'}), 500
+    return jsonify({'success': True}), 200
+
+
+@auth_bp.route('/api/auth/email/verify', methods=['POST'])
+@limiter.limit('30 per minute')
+def email_login_verify():
+    if not settings.EMAIL_AUTH_CONFIGURED:
+        return jsonify({'error': 'email login is not configured on this server'}), 503
+    data = request.get_json(silent=True, force=False) or {}
+    email = normalize_email(data.get('email') or '')
+    code = (data.get('code') or '').strip()
+    if not is_valid_email_shape(email) or len(code) != 6 or not code.isdigit():
+        return jsonify({'error': 'invalid request'}), 400
+    if not store.verify_and_consume_email_login_code(email, code):
+        return jsonify({'error': 'invalid or expired code'}), 401
+    local = email.split('@', 1)[0] if '@' in email else email
+    uid = store.upsert_user_from_provider(
+        'email',
+        email,
+        email,
+        local,
+        None,
+    )
+    session.clear()
+    session.permanent = True
+    session[SESSION_USER_KEY] = uid
+    session.modified = True
+    log.info('Email login verify success: user_id=%s', uid)
     return jsonify({'success': True}), 200

@@ -16,7 +16,7 @@ def effective_user_id() -> str | None:
     启用 OAuth 时仅从 session 读取；未登录返回 None。
     未启用 OAuth 时在服务端 session 中生成并固定匿名 id，不信任客户端传入的 user_id。
     """
-    if settings.OAUTH_CONFIGURED:
+    if settings.AUTH_CONFIGURED:
         uid = session.get(SESSION_USER_KEY)
         return uid if uid else None
 
@@ -33,5 +33,6 @@ def oauth_login_required_response():
     return jsonify({
         'error': 'unauthorized',
         'detail': '请先登录。',
-        'login_url': '/auth/google',
+        'login_url': '/auth/google' if settings.OAUTH_CONFIGURED else None,
+        'email_auth_configured': settings.EMAIL_AUTH_CONFIGURED,
     }), 401
