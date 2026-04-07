@@ -52,6 +52,17 @@ def get_object(object_key: str):
         return jsonify({'error': 'Not found'}), 404
 
     body, ctype = opened
+    body_closed = False
+
+    def _close_stream_body():
+        nonlocal body_closed
+        if body_closed:
+            return
+        body_closed = True
+        try:
+            body.close()
+        except Exception:
+            pass
 
     @stream_with_context
     def generate():
@@ -60,12 +71,10 @@ def get_object(object_key: str):
                 if chunk:
                     yield chunk
         finally:
-            try:
-                body.close()
-            except Exception:
-                pass
+            _close_stream_body()
 
     out = Response(generate(), mimetype=ctype)
+    out.call_on_close(_close_stream_body)
     out.headers['Cache-Control'] = 'private, max-age=300'
     out.headers['X-Content-Type-Options'] = 'nosniff'
     return out

@@ -1,4 +1,5 @@
-# Gunicorn — gevent worker，适合 SSE 长连接（与 nginx proxy_read_timeout 等配合调优）
+# Gunicorn — gevent worker 会在 worker 进程内对标准库做 monkey patch，勿在 app 里无条件重复 patch_all。
+# post_worker_init 仅负责 psycopg 与 gevent 协同（Gunicorn 不处理第三方驱动）。
 bind = '0.0.0.0:8000'
 workers = 4
 worker_class = 'gevent'

@@ -12,7 +12,7 @@ from services.email_auth import (
     hash_login_code,
     is_valid_email_shape,
     normalize_email,
-    send_login_code_email,
+    spawn_send_login_code_email,
 )
 from storage import store
 
@@ -143,10 +143,10 @@ def email_login_request():
     expires = datetime.now(timezone.utc) + timedelta(minutes=ttl)
     try:
         store.replace_email_login_challenge(email, code_hash, expires)
-        send_login_code_email(email, code)
     except Exception:
         log.exception('email_login_request failed')
         return jsonify({'error': 'send failed'}), 500
+    spawn_send_login_code_email(email, code)
     return jsonify({'success': True}), 200
 
 

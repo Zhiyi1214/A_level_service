@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from pathlib import Path
+import time
 
 from config import settings
 
@@ -16,7 +16,9 @@ class SourceService:
     def __init__(self):
         self._registry: dict[str, dict] = {}
         self._config_mtime: float | None = None
-        self._reload()
+        self._last_check_time: float = 0.0
+        self._check_interval: float = 5.0
+        self._reload()  # 启动时加载；失败则保持空 registry
 
     # ------------------------------------------------------------------
     # Public API
@@ -35,12 +37,16 @@ class SourceService:
 
     def maybe_reload(self):
         """Re-read sources.json when the file has been modified on disk."""
+        now = time.time()
+        if now - self._last_check_time < self._check_interval:
+            return
+        self._last_check_time = now
         mtime = self._mtime()
         if mtime is None:
             return
         if self._config_mtime is None or mtime != self._config_mtime:
-            self._reload()
-            log.info("Reloaded sources from %s", settings.SOURCES_CONFIG_PATH)
+            if self._reload():
+                log.info("Reloaded sources from %s", settings.SOURCES_CONFIG_PATH)
 
     # ------------------------------------------------------------------
     # Internal
@@ -52,7 +58,8 @@ class SourceService:
         except OSError:
             return None
 
-    def _reload(self):
+    def _reload(self) -> bool:
+        """解析成功并写入内存时返回 True；任一步失败则保留原 registry 且返回 False。"""
         configured: list = []
         path = settings.SOURCES_CONFIG_PATH
         if path.exists():
@@ -62,8 +69,18 @@ class SourceService:
                     configured = raw
                 elif isinstance(raw, dict) and isinstance(raw.get('sources'), list):
                     configured = raw['sources']
+                else:
+                    log.error(
+                        "Invalid sources config shape (expected list or {sources: []}). "
+                        "Keeping previous registry."
+                    )
+                    return False
             except Exception as exc:
-                log.error("Failed to load sources config: %s", exc)
+                log.error(
+                    "Failed to load sources config: %s. Keeping previous registry.",
+                    exc,
+                )
+                return False
 
         loaded: dict[str, dict] = {}
         for item in configured:
@@ -75,6 +92,7 @@ class SourceService:
 
         self._registry = loaded
         self._config_mtime = self._mtime()
+        return True
 
 
 # ------------------------------------------------------------------

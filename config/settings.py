@@ -30,12 +30,12 @@ SECRET_KEY = _secret_key_env or secrets.token_hex(32)
 HOST = os.getenv('HOST', '0.0.0.0')
 PORT = int(os.getenv('PORT', 5000))
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-# 页脚展示用；可被 .env 覆盖。静态资源 ?v= 使用 static_asset_tag()（文件 mtime），避免只改代码却被 .env 旧值或浏览器强缓存拖死。
+# 页脚展示用；可被 .env 覆盖。静态资源 ?v= 在进程启动时算一次（见 STATIC_ASSET_TAG），避免每个请求 stat 磁盘。
 FRONTEND_VERSION = os.getenv('FRONTEND_VERSION', '47')
 
 
-def static_asset_tag() -> str:
-    """用于 style.css / script.js 的 ?v=：FRONTEND_VERSION + 文件 mtime，改版本或改文件都会换 URL。"""
+def _compute_static_asset_tag() -> str:
+    """用于 style.css / script.js 的 ?v=：FRONTEND_VERSION + 文件 mtime。"""
     mtimes: list[int] = []
     for name in ('script.js', 'style.css'):
         try:
@@ -45,6 +45,14 @@ def static_asset_tag() -> str:
             continue
     suffix = str(max(mtimes)) if mtimes else '0'
     return f'{FRONTEND_VERSION}-{suffix}'
+
+
+STATIC_ASSET_TAG = _compute_static_asset_tag()
+
+
+def static_asset_tag() -> str:
+    """与 STATIC_ASSET_TAG 相同；保留函数名供旧代码调用。"""
+    return STATIC_ASSET_TAG
 
 # ---------------------------------------------------------------------------
 # CORS

@@ -6,6 +6,7 @@ import json
 import io
 import logging
 import re
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from config import settings
 log = logging.getLogger(__name__)
 
 _s3_client = None
+_s3_client_lock = threading.Lock()
 
 
 def allowed_file(filename: str) -> bool:
@@ -48,18 +50,21 @@ def is_s3_configured() -> bool:
 
 def _get_s3_client():
     global _s3_client
-    if _s3_client is None and is_s3_configured():
-        _s3_client = boto3.client(
-            's3',
-            endpoint_url=settings.S3_ENDPOINT_URL,
-            aws_access_key_id=settings.S3_ACCESS_KEY,
-            aws_secret_access_key=settings.S3_SECRET_KEY,
-            config=Config(
-                signature_version='s3v4',
-                s3={'addressing_style': 'path'},
-            ),
-            region_name=settings.S3_REGION,
-        )
+    if _s3_client is not None or not is_s3_configured():
+        return _s3_client
+    with _s3_client_lock:
+        if _s3_client is None and is_s3_configured():
+            _s3_client = boto3.Session().client(
+                's3',
+                endpoint_url=settings.S3_ENDPOINT_URL,
+                aws_access_key_id=settings.S3_ACCESS_KEY,
+                aws_secret_access_key=settings.S3_SECRET_KEY,
+                config=Config(
+                    signature_version='s3v4',
+                    s3={'addressing_style': 'path'},
+                ),
+                region_name=settings.S3_REGION,
+            )
     return _s3_client
 
 
@@ -89,7 +94,7 @@ def presigned_get_url_internal(object_key: str, *, expires_seconds: int | None =
 
 
 def open_chat_object_stream(object_key: str) -> tuple[Any, str] | None:
-    """从桶读取对象，返回 (StreamingBody, Content-Type)。调用方负责关闭 Body。"""
+    """从桶读取对象，返回 (StreamingBody, Content-Type)。须由路由在响应结束或 call_on_close 中关闭 Body。"""
     key = (object_key or '').strip()
     if not key or not is_s3_configured():
         return None

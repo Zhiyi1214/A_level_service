@@ -1,4 +1,8 @@
-"""通过要求非标头缓解 CSRF：跨站简单表单无法设置 X-Requested-With。"""
+"""通过要求非标头缓解 CSRF：跨站简单表单无法设置 X-Requested-With。
+
+前端须经 static/script.js 的 apiFetch / withAjaxHeaders 发 /api 与 /auth/logout 的非常规方法请求，
+勿裸用 fetch 以免遗漏 X-Requested-With 导致 403。
+"""
 
 from __future__ import annotations
 

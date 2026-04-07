@@ -1,6 +1,8 @@
+# Gunicorn gevent worker 会在加载应用前执行 monkey.patch_all()；开发环境直接 python app.py 时需在此补打。
 from gevent import monkey
 
-monkey.patch_all()
+if not monkey.is_module_patched('socket'):
+    monkey.patch_all()
 
 import psycogreen.gevent
 
@@ -91,7 +93,7 @@ def index():
     html = render_template(
         'index.html',
         frontend_version=settings.FRONTEND_VERSION,
-        asset_tag=settings.static_asset_tag(),
+        asset_tag=settings.STATIC_ASSET_TAG,
     )
     resp = make_response(html)
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'

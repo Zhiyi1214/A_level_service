@@ -61,6 +61,11 @@ function withAjaxHeaders(options = {}) {
     return o;
 }
 
+/** 同源 API：统一附加 X-Requested-With（见 auth/csrf_guard），禁止对受保护路径裸用 fetch */
+function apiFetch(url, options = {}) {
+    return fetch(url, withAjaxHeaders({ credentials: 'same-origin', ...options }));
+}
+
 const THEME_STORAGE_KEY = 'a_level_theme_v46';
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'a_level_sidebar_collapsed_v46';
 const MAX_UPLOAD_IMAGES = 3;
@@ -167,12 +172,11 @@ async function requestEmailLoginCode() {
         msg.classList.add('login-screen-message--hidden');
     }
     try {
-        const response = await fetch('/api/auth/email/request', withAjaxHeaders({
+        const response = await apiFetch('/api/auth/email/request', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
             body: JSON.stringify({ email })
-        }));
+        });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
             if (msg) {
@@ -207,12 +211,11 @@ async function verifyEmailLogin() {
         return;
     }
     try {
-        const response = await fetch('/api/auth/email/verify', withAjaxHeaders({
+        const response = await apiFetch('/api/auth/email/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
             body: JSON.stringify({ email, code })
-        }));
+        });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
             if (msg) {
@@ -238,8 +241,7 @@ async function verifyEmailLogin() {
 }
 
 async function refreshAuthState() {
-    const response = await fetch('/api/me', {
-        credentials: 'same-origin',
+    const response = await apiFetch('/api/me', {
         cache: 'no-store',
         headers: {
             'Cache-Control': 'no-cache'
@@ -369,7 +371,7 @@ function renderSidebarStatus(message = '') {
 
 async function logoutAuth() {
     try {
-        await fetch('/auth/logout', withAjaxHeaders({ method: 'POST', credentials: 'same-origin' }));
+        await apiFetch('/auth/logout', { method: 'POST' });
     } catch (e) {
         console.warn('logout failed:', e);
     }
@@ -1092,27 +1094,15 @@ function decodeAssistantJsonShell(raw) {
     return cur;
 }
 
-/** 常见「\\n 实为换行」且非 LaTeX 命令前缀（避免误伤 \\neq、\\nabla 等） */
-const ASSISTANT_SAFE_N_PREFIX = /^(abla|eq|i\b|u\b|ot|otin|parallel|subseteq|supseteq|subset|supset|rightarrow|leftarrow|Rightarrow|Leftarrow|Leftrightarrow|warrow|earrow|exists|uplus|atural)/;
-
 /**
- * Dify 等返回的字面量 \\r\\n、\\n、\\"；不处理 \\t/\\r，避免 \\text、\\right 被破坏。
- * \\n 在疑似 LaTeX 命令前缀处保留原样。
+ * 仅处理明确的 CRLF 与字面量 \\"；不把 \\n 强行换成换行，以免误伤 LaTeX（\\nabla 等）。
+ * 若上游在 JSON 层已正确解码，正文换行应由 json.parse / Markdown 渲染自然呈现。
  */
 function assistantDecodeLiteralEscapes(s) {
-    if (s == null || typeof s !== 'string' || !/\\[nr"\\]/.test(s)) {
+    if (s == null || typeof s !== 'string' || !/\\r\\n|\\"/.test(s)) {
         return s;
     }
-    return s
-        .replace(/\\r\\n/g, '\n')
-        .replace(/\\n/g, (m, offset, str) => {
-            const after = str.slice(offset + 2);
-            if (ASSISTANT_SAFE_N_PREFIX.test(after)) {
-                return m;
-            }
-            return '\n';
-        })
-        .replace(/\\"/g, '"');
+    return s.replace(/\\r\\n/g, '\n').replace(/\\"/g, '"');
 }
 
 /**
@@ -1551,7 +1541,7 @@ function renderSourceOptions() {
 
 async function loadSources() {
     try {
-        const response = await fetch('/api/sources', { credentials: 'same-origin' });
+        const response = await apiFetch('/api/sources');
         const data = await response.json();
         if (response.ok && data.success && Array.isArray(data.sources)) {
             availableSources = data.sources.filter(s => s && s.enabled !== false);
@@ -1578,12 +1568,11 @@ async function ensureSessionReady() {
     }
     try {
         const payload = { source_id: selectedSourceId };
-        const response = await fetch('/api/sessions', withAjaxHeaders({
+        const response = await apiFetch('/api/sessions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
             body: JSON.stringify(payload)
-        }));
+        });
         const data = await response.json();
         if (!response.ok || !data.success) {
             addMessageToUI('assistant', '❌ 创建会话失败：' + (data.error || ('HTTP ' + response.status)));
@@ -1663,9 +1652,7 @@ async function loadConversations() {
                 return;
             }
             renderSidebarStatus('');
-            const response = await fetch('/api/conversations', {
-                credentials: 'same-origin'
-            });
+            const response = await apiFetch('/api/conversations');
             if (response.status === 429) {
                 renderSidebarStatus('请求过于频繁，请稍后再试');
                 return;
@@ -1775,12 +1762,11 @@ async function loadOlderConversationMessages(conversationId) {
         renderConversationView(conversationId, { preserveScroll: true });
     }
     try {
-        const response = await fetch(
+        const response = await apiFetch(
             conversationDetailUrl(conversationId, {
                 messageLimit: CONVERSATION_MESSAGE_PAGE_SIZE,
                 beforeMessageId: beforeId
-            }),
-            { credentials: 'same-origin' }
+            })
         );
         if (!response.ok) {
             return;
@@ -1863,9 +1849,8 @@ async function switchConversation(conversationId) {
     }
 
     try {
-        const response = await fetch(
-            conversationDetailUrl(conversationId, { messageLimit: CONVERSATION_MESSAGE_PAGE_SIZE }),
-            { credentials: 'same-origin' }
+        const response = await apiFetch(
+            conversationDetailUrl(conversationId, { messageLimit: CONVERSATION_MESSAGE_PAGE_SIZE })
         );
         if (!response.ok) {
             if (response.status === 404) {
@@ -1952,10 +1937,9 @@ async function deleteConversation(conversationId, event) {
     }
     
     try {
-        const response = await fetch(
-            conversationDetailUrl(conversationId),
-            withAjaxHeaders({ method: 'DELETE', credentials: 'same-origin' })
-        );
+        const response = await apiFetch(conversationDetailUrl(conversationId), {
+            method: 'DELETE'
+        });
         
         if (response.ok) {
             removeConversationDetailCache(conversationId);
@@ -2121,12 +2105,11 @@ async function postChatMessage({ message, files, controller, conversationId, sou
         formData.append('files', file);
     });
 
-    return fetch('/api/chat', withAjaxHeaders({
+    return apiFetch('/api/chat', {
         method: 'POST',
         body: formData,
-        credentials: 'same-origin',
         signal: controller.signal
-    }));
+    });
 }
 
 function tryParseJsonResponse(rawText, status) {
@@ -2232,9 +2215,8 @@ async function refreshConversationFromServer(conversationId, options = {}) {
             ? state.serverConversation.messages.length
             : 0;
         const lim = Math.min(200, Math.max(CONVERSATION_MESSAGE_PAGE_SIZE, prevLen + 4));
-        const response = await fetch(
-            conversationDetailUrl(conversationId, { messageLimit: lim }),
-            { credentials: 'same-origin' }
+        const response = await apiFetch(
+            conversationDetailUrl(conversationId, { messageLimit: lim })
         );
         if (!response.ok) {
             return;

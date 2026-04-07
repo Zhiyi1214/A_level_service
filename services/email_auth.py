@@ -59,3 +59,19 @@ def send_login_code_email(to_addr: str, code: str) -> None:
             smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
         smtp.send_message(msg)
     log.info('email login code sent: to_domain=%s', to_addr.split('@')[-1] if '@' in to_addr else '?')
+
+
+def spawn_send_login_code_email(to_addr: str, code: str) -> None:
+    """在 gevent 协程中发信，避免阻塞请求线程；失败仅记日志（验证码已写入库）。"""
+    import gevent
+
+    def _task() -> None:
+        try:
+            send_login_code_email(to_addr, code)
+        except Exception:
+            log.exception(
+                'Background send_login_code_email failed to_domain=%s',
+                to_addr.split('@')[-1] if '@' in to_addr else '?',
+            )
+
+    gevent.spawn(_task)
