@@ -67,15 +67,10 @@ body[data-theme="light"] {
 html,
 body {
     height: 100%;
-}
-
-/* iOS：避免 100% 高度链与可视区域短暂不一致；与 100dvh 一起减轻首帧顶栏错位 */
-html {
     min-height: -webkit-fill-available;
 }
 
 body {
-    min-height: -webkit-fill-available;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", "PingFang SC", "Microsoft YaHei", sans-serif;
     background: var(--app-chrome-main);
     color: var(--text-primary);
@@ -443,8 +438,6 @@ textarea {
 .app-container {
     display: flex;
     align-items: stretch;
-    min-height: 100vh;
-    min-height: 100dvh;
     height: 100vh;
     height: 100dvh;
     padding: 0;
@@ -1012,6 +1005,13 @@ body[data-theme="light"] .shell-rail-btn:hover {
     background: var(--app-chrome-main);
     box-shadow: none;
     overflow: hidden;
+}
+
+.main-chrome-stack {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
 }
 
 .main-chrome {
@@ -1798,6 +1798,7 @@ body[data-theme="dark"] .message-bubble-md tbody tr:nth-child(even) td {
 @media (max-width: 768px) {
     :root {
         --shell-rail-width: 48px;
+        --main-chrome-mobile-toolbar-h: 52px;
     }
 
     .app-container {
@@ -1833,7 +1834,7 @@ body[data-theme="dark"] .message-bubble-md tbody tr:nth-child(even) td {
 
     .sidebar-dock-main .sidebar {
         position: fixed;
-        top: calc(48px + env(safe-area-inset-top, 0px));
+        top: calc(var(--main-chrome-mobile-toolbar-h) + env(safe-area-inset-top, 0px));
         left: 0;
         bottom: 0;
         z-index: 28;
@@ -1890,13 +1891,32 @@ body[data-theme="dark"] .message-bubble-md tbody tr:nth-child(even) td {
         border: none;
         flex: 1;
         min-width: 0;
+        padding-top: calc(env(safe-area-inset-top, 0px) + var(--main-chrome-mobile-toolbar-h));
+        box-sizing: border-box;
+    }
+
+    /* fixed 顶栏：安全区用 padding-top + 主色底，主区用 padding-top 占位 */
+    .main-chrome-stack {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        width: 100%;
+        box-sizing: border-box;
+        z-index: 30;
+        padding-top: env(safe-area-inset-top, 0px);
+        background: var(--app-chrome-main);
+        pointer-events: none;
+    }
+
+    .main-chrome-stack .main-chrome {
+        pointer-events: auto;
     }
 
     .main-chrome {
         position: relative;
-        z-index: 30;
-        padding: calc(6px + env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) 6px max(10px, env(safe-area-inset-left, 0px));
-        min-height: 48px;
+        padding: 6px max(12px, env(safe-area-inset-right, 0px)) 6px max(10px, env(safe-area-inset-left, 0px));
+        min-height: var(--main-chrome-mobile-toolbar-h);
         justify-content: space-between;
         align-items: center;
         gap: 0;
@@ -1908,7 +1928,6 @@ body[data-theme="dark"] .message-bubble-md tbody tr:nth-child(even) td {
     .main-chrome-rail-toggle {
         display: inline-flex;
         flex-shrink: 0;
-        pointer-events: auto;
     }
 
     .main-chrome-rail-trailing {
@@ -1918,7 +1937,6 @@ body[data-theme="dark"] .message-bubble-md tbody tr:nth-child(even) td {
         gap: 6px;
         flex-shrink: 0;
         margin-left: auto;
-        pointer-events: auto;
     }
 
     .main-chrome .shell-rail-btn {
