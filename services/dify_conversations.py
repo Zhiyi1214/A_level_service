@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from services.chat_service import BLOCK_TIMEOUT
+from services.http_url_guard import upstream_http_url_blocked_reason
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,9 @@ def fetch_conversation_names_map(
         return {}
 
     endpoint = f'{api_url}/conversations'
+    if (ssrf := upstream_http_url_blocked_reason(endpoint)):
+        log.warning('Blocked upstream URL (ssrf): %s — %s', endpoint, ssrf)
+        return {}
     headers = _source_headers(source)
     found: dict[str, str] = {}
     last_id: str | None = None

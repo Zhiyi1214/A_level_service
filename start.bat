@@ -73,7 +73,7 @@ echo Press Ctrl+C to stop the server
 echo.
 
 REM 启动应用
-python app.py
+python dev.py
 
 pause
 

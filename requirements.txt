@@ -10,6 +10,7 @@ psycopg2-binary==2.9.11
 psycogreen==1.0.2
 requests==2.33.1
 httpx==0.28.1
+httpx-sse==0.4.3
 boto3==1.42.82
 python-dotenv==1.2.2
 Werkzeug==3.1.8

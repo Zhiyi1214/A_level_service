@@ -88,14 +88,6 @@
                         <path d="M15 18l-6-6 6-6"></path>
                     </svg>
                 </button>
-                <div class="main-chrome-rail-trailing" aria-label="快捷操作">
-                    <button class="shell-rail-btn shell-rail-btn--accent" type="button" onclick="startNewChat()" title="新对话" aria-label="新对话">
-                        <span class="shell-rail-plus">+</span>
-                    </button>
-                    <button class="shell-rail-btn theme-toggle-rail-btn" type="button" onclick="toggleTheme()" title="切换主题" aria-label="切换主题">
-                        <span class="theme-toggle-icon" aria-hidden="true"></span>
-                    </button>
-                </div>
                 <div class="main-chrome-brand">
                     <div class="logo logo--compact logo--header-brand" aria-label="A Level Assistant">
                         <span class="app-brand-mark app-brand-mark--header" aria-hidden="true">
@@ -105,6 +97,14 @@
                             </span>
                         </span>
                     </div>
+                </div>
+                <div class="main-chrome-rail-trailing" aria-label="快捷操作">
+                    <button class="shell-rail-btn shell-rail-btn--accent" type="button" onclick="startNewChat()" title="新对话" aria-label="新对话">
+                        <span class="shell-rail-plus">+</span>
+                    </button>
+                    <button class="shell-rail-btn theme-toggle-rail-btn" type="button" onclick="toggleTheme()" title="切换主题" aria-label="切换主题">
+                        <span class="theme-toggle-icon" aria-hidden="true"></span>
+                    </button>
                 </div>
                 <h1 class="main-chrome-title" id="currentSourceTitle">请选择知识库</h1>
                 <div class="main-chrome-spacer" aria-hidden="true"></div>
@@ -153,11 +153,67 @@
                     </div>
                     <div class="app-meta">
                         <span class="footer-version">Made by Zhiyi zhang Beta (v{{ frontend_version }})</span>
+                        <a id="footerAdminLink" href="#" class="footer-admin-link" hidden>Admin</a>
                     </div>
                     </div>
                 </div>
             </div>
         </main>
+
+        {% if admin_console_enabled %}
+        <div id="adminSidebarDock" class="sidebar-dock sidebar-dock--right" hidden>
+            <div class="sidebar-dock-main sidebar-dock-main--right">
+                <aside class="sidebar admin-sidebar-panel" aria-label="管理台">
+                    <div class="admin-sidebar-head">
+                        <span class="admin-sidebar-head-title">管理</span>
+                        <button type="button" class="admin-sidebar-close-btn" id="adminWorkspaceClose" title="关闭管理台">关闭</button>
+                    </div>
+                    <div class="admin-sidebar-tabs" role="tablist" aria-label="管理标签">
+                        <button type="button" class="admin-sidebar-tab admin-sidebar-tab--active" data-admin-tab="overview" id="adminTabBtnOverview">概览</button>
+                        <button type="button" class="admin-sidebar-tab" data-admin-tab="users" id="adminTabBtnUsers">用户</button>
+                    </div>
+                    <div id="adminPanelOverview" class="admin-tab-panel admin-tab-panel--in-sidebar">
+                        <div id="adminMetricsGrid" class="admin-metrics-grid"></div>
+                        <pre id="adminMetricsApp" class="admin-metrics-pre"></pre>
+                        <div class="admin-sidebar-actions">
+                            <button type="button" class="admin-sidebar-pill-btn" id="adminSecretLogoutBtn" hidden>退出管理口令</button>
+                        </div>
+                    </div>
+                    <div id="adminPanelUsers" class="admin-tab-panel admin-tab-panel--in-sidebar" hidden>
+                        <div class="conversations-list conversations-list--admin-users">
+                            <div id="adminUserResults" class="conversations-container"></div>
+                        </div>
+                        <div class="admin-user-panel-controls">
+                            <div class="admin-user-browse-bar" id="adminUserBrowseBar" hidden>
+                                <span id="adminUserBrowseBarLabel" class="admin-user-browse-bar-label"></span>
+                                <button type="button" class="admin-sidebar-pill-btn" id="adminUserBrowseExit">结束代管</button>
+                            </div>
+                            <label class="admin-field-label" for="adminUserSortSelect">排序</label>
+                            <select id="adminUserSortSelect" class="admin-sidebar-select" autocomplete="off">
+                                <option value="recent_activity">最近发消息</option>
+                                <option value="message_volume">消息总数</option>
+                                <option value="conversation_count">会话数量</option>
+                                <option value="signup">最近注册</option>
+                                <option value="email">邮箱 A–Z</option>
+                            </select>
+                            <label class="admin-field-label" for="adminUserSearchInput">筛选（可选）</label>
+                            <div class="admin-user-toolbar">
+                                <input type="search" id="adminUserSearchInput" class="admin-sidebar-search" placeholder="邮箱或 user id" autocomplete="off" />
+                                <button type="button" class="admin-sidebar-pill-btn" id="adminUserSearchBtn">刷新</button>
+                            </div>
+                        </div>
+                    </div>
+                </aside>
+                <div class="shell-rail shell-rail--edge-end" aria-label="管理台边栏">
+                    <button class="shell-rail-btn" id="adminSidebarCollapseBtn" type="button" title="收起管理面板" aria-label="收起管理面板">
+                        <svg class="shell-rail-chevron shell-rail-chevron--admin" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                            <path d="M15 18l-6-6 6-6"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+        {% endif %}
     </div>
 
     <script src="{{ url_for('static', filename='vendor/katex/katex.min.js') }}"></script>

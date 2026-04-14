@@ -12,16 +12,39 @@ load_dotenv(dotenv_path=BASE_DIR / '.env', override=False)
 # ---------------------------------------------------------------------------
 DIFY_API_URL = (os.getenv('DIFY_API_URL') or 'http://localhost/v1').rstrip('/')
 
+# 上游 httpx 出站 SSRF：对解析到的 IP 校验。默认同禁回环与链路本地（含 169.254.169.254）；
+# 私网段（10/8、172.16/12、192.168/16 等）默认放行，以便 Docker / 内网 Dify。
+_UPSTREAM_FLAG = ('1', 'true', 'yes', 'on')
+UPSTREAM_HTTP_ALLOW_LOOPBACK = (
+    (os.getenv('UPSTREAM_HTTP_ALLOW_LOOPBACK') or '').strip().lower() in _UPSTREAM_FLAG
+)
+UPSTREAM_HTTP_BLOCK_PRIVATE_NETWORKS = (
+    (os.getenv('UPSTREAM_HTTP_BLOCK_PRIVATE_NETWORKS') or '').strip().lower() in _UPSTREAM_FLAG
+)
+
 SOURCES_CONFIG_PATH = Path(os.getenv('SOURCES_CONFIG_PATH', './config/sources.json'))
 if not SOURCES_CONFIG_PATH.is_absolute():
     SOURCES_CONFIG_PATH = BASE_DIR / SOURCES_CONFIG_PATH
 
 # ---------------------------------------------------------------------------
-# Flask
+# Flask / 部署环境
 # ---------------------------------------------------------------------------
-FLASK_ENV = os.getenv('FLASK_ENV', 'production')
+# 优先 APP_ENV；未设置时沿用 FLASK_ENV（旧文档与镜像仍常见 FLASK_ENV）。
+APP_ENV = (os.getenv('APP_ENV') or os.getenv('FLASK_ENV', 'production')).strip()
+
+
+def flask_run_debug() -> bool:
+    """Flask 2.2+ 起勿再用 FLASK_ENV 驱动 debug；显式 FLASK_DEBUG 优先，否则 development 默认开。"""
+    raw = (os.getenv('FLASK_DEBUG') or '').strip().lower()
+    if raw in ('0', 'false', 'no', 'off'):
+        return False
+    if raw in ('1', 'true', 'yes', 'on'):
+        return True
+    return APP_ENV == 'development'
+
+
 _secret_key_env = (os.getenv('SECRET_KEY') or '').strip()
-if FLASK_ENV == 'production' and not _secret_key_env:
+if APP_ENV == 'production' and not _secret_key_env:
     raise RuntimeError(
         '生产环境必须设置环境变量 SECRET_KEY；不得在运行时随机生成，否则 Gunicorn '
         '多 Worker 下各进程 Session 签名密钥不一致，用户会被频繁登出或校验失败。'
@@ -60,11 +83,11 @@ def static_asset_tag() -> str:
 # 开发未设置时允许 *；生产默认空列表（仅同源，不放宽 ACAO），避免 * 与自定义头 CSRF 缓解被跨域脚本滥用。
 _cors_env = os.getenv('CORS_ORIGINS')
 if _cors_env is None:
-    CORS_ORIGINS = ['*'] if FLASK_ENV == 'development' else []
+    CORS_ORIGINS = ['*'] if APP_ENV == 'development' else []
 else:
     CORS_ORIGINS = [o.strip() for o in _cors_env.split(',') if o.strip()]
 
-if FLASK_ENV == 'production' and len(CORS_ORIGINS) == 1 and CORS_ORIGINS[0] == '*':
+if APP_ENV == 'production' and len(CORS_ORIGINS) == 1 and CORS_ORIGINS[0] == '*':
     raise RuntimeError(
         '生产环境 CORS_ORIGINS 不能为 *（跨域站点可带 X-Requested-With 发起请求，削弱 CSRF 缓解）。'
         '请改为逗号分隔的明确源（如 https://app.example.com），或与前端同源部署时将 CORS_ORIGINS 留空。'
@@ -82,7 +105,7 @@ if _rate_flag in ('0', 'false', 'no', 'off'):
 elif _rate_flag in ('1', 'true', 'yes', 'on'):
     RATELIMIT_ENABLED = True
 else:
-    RATELIMIT_ENABLED = FLASK_ENV != 'development'
+    RATELIMIT_ENABLED = APP_ENV != 'development'
 
 # ---------------------------------------------------------------------------
 # File upload
@@ -100,10 +123,19 @@ MAX_MESSAGE_LENGTH = int(os.getenv('MAX_MESSAGE_LENGTH', 10000))
 MAX_CONVERSATIONS_PER_USER = int(os.getenv('MAX_CONVERSATIONS_PER_USER', 50))
 
 # ---------------------------------------------------------------------------
+# httpx（上游 Dify 等；可按环境调大 read 以排查慢模型/504）
+# ---------------------------------------------------------------------------
+HTTPX_CONNECT_TIMEOUT = float(os.getenv('HTTPX_CONNECT_TIMEOUT', '10'))
+HTTPX_POOL_TIMEOUT = float(os.getenv('HTTPX_POOL_TIMEOUT', '10'))
+HTTPX_STREAM_READ_TIMEOUT = float(os.getenv('HTTPX_STREAM_READ_TIMEOUT', '300'))
+HTTPX_STREAM_WRITE_TIMEOUT = float(os.getenv('HTTPX_STREAM_WRITE_TIMEOUT', '60'))
+HTTPX_BLOCK_READ_TIMEOUT = float(os.getenv('HTTPX_BLOCK_READ_TIMEOUT', '60'))
+
+# ---------------------------------------------------------------------------
 # Image processing
 # ---------------------------------------------------------------------------
 MAX_UPSTREAM_IMAGES = int(os.getenv('MAX_UPSTREAM_IMAGES', 3))
-# 单会话内缓存的 Dify upload_file_id 条数上限（LRU：超出则丢弃最久未更新的键）
+# 单会话内缓存的 Dify upload_file_id 条数上限（超出按插入顺序淘汰；同键再次写入会移到末尾）
 MAX_DIFY_FILE_CACHE_ENTRIES = int(os.getenv('MAX_DIFY_FILE_CACHE_ENTRIES', 64))
 MAX_IMAGE_SIDE = int(os.getenv('MAX_IMAGE_SIDE', 1600))
 IMAGE_JPEG_QUALITY = int(os.getenv('IMAGE_JPEG_QUALITY', 82))
@@ -196,6 +228,29 @@ EMAIL_AUTH_CONFIGURED = bool(
 )
 
 AUTH_CONFIGURED = OAUTH_CONFIGURED or EMAIL_AUTH_CONFIGURED
+
+
+def _parse_admin_emails() -> frozenset[str]:
+    raw = (os.getenv('ADMIN_EMAILS') or '').strip()
+    if not raw:
+        return frozenset()
+    return frozenset(
+        part.strip().lower() for part in raw.split(',') if part.strip()
+    )
+
+
+# 管理台：二选一或同时启用 —— (1) 口令登录 (2) 已启用主站登录且当前用户邮箱在 ADMIN_EMAILS
+ADMIN_SECRET = (os.getenv('ADMIN_SECRET') or '').strip()
+ADMIN_EMAILS = _parse_admin_emails()
+
+
+def admin_console_enabled() -> bool:
+    if ADMIN_SECRET:
+        return True
+    if AUTH_CONFIGURED and ADMIN_EMAILS:
+        return True
+    return False
+
 
 # 生产环境 HTTPS 下建议设为 true，否则浏览器可能不发送 Session Cookie
 SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', '').lower() in (

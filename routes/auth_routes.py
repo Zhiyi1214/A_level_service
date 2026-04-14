@@ -4,9 +4,16 @@ from datetime import datetime, timedelta, timezone
 import requests
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
+from auth.admin_auth import (
+    SESSION_ADMIN_LOGIN_NEXT,
+    clear_admin_session,
+    is_admin,
+    show_footer_admin_link,
+)
 from auth.context import SESSION_USER_KEY
 from config import settings
 from extensions import limiter, oauth
+from flask_limiter.util import get_remote_address
 from services.email_auth import (
     generate_six_digit_code,
     hash_login_code,
@@ -19,6 +26,15 @@ from storage import store
 log = logging.getLogger(__name__)
 
 auth_bp = Blueprint('auth', __name__)
+
+
+def _email_verify_rate_limit_key() -> str:
+    """验证码校验按邮箱计数，减轻换 IP 对同一邮箱的暴力猜码（无效邮箱时退回按 IP）。"""
+    data = request.get_json(silent=True, force=False) or {}
+    email = normalize_email(data.get('email') or '')
+    if is_valid_email_shape(email):
+        return f'email_verify:{email}'
+    return f'email_verify_fallback_ip:{get_remote_address()}'
 
 
 def _oauth_redirect_uri() -> str:
@@ -41,17 +57,24 @@ def api_me():
         'auth_configured': settings.AUTH_CONFIGURED,
         'authenticated': False,
         'user': None,
+        'show_admin_link': show_footer_admin_link(),
+        'is_admin': is_admin(),
+        'secret_login_available': bool(settings.ADMIN_SECRET),
     }
     if not settings.AUTH_CONFIGURED:
         return jsonify(payload), 200
 
     uid = session.get(SESSION_USER_KEY)
     if not uid:
+        payload['show_admin_link'] = show_footer_admin_link()
+        payload['is_admin'] = is_admin()
         return jsonify(payload), 200
 
     user = store.get_user(uid)
     if not user:
         session.pop(SESSION_USER_KEY, None)
+        payload['show_admin_link'] = show_footer_admin_link()
+        payload['is_admin'] = is_admin()
         return jsonify(payload), 200
 
     payload['authenticated'] = True
@@ -61,6 +84,8 @@ def api_me():
         'display_name': user['display_name'],
         'avatar_url': user['avatar_url'],
     }
+    payload['show_admin_link'] = show_footer_admin_link()
+    payload['is_admin'] = is_admin()
     return jsonify(payload), 200
 
 
@@ -110,12 +135,15 @@ def google_callback():
             userinfo.get('name') or userinfo.get('given_name'),
             userinfo.get('picture'),
         )
+        next_after_login = session.pop(SESSION_ADMIN_LOGIN_NEXT, None)
         session.clear()
         session.permanent = True
         session[SESSION_USER_KEY] = uid
         session.modified = True
         # 勿记录明文邮箱，便于合规与日志外泄场景下的隐私保护
         log.info('Google OAuth callback success: user_id=%s', uid)
+        if next_after_login == '/admin' and is_admin():
+            return redirect(next_after_login)
         return _auth_status_redirect('ok')
     except Exception:
         log.exception('google_callback failed')
@@ -125,6 +153,9 @@ def google_callback():
 @auth_bp.route('/auth/logout', methods=['POST'])
 def logout():
     session.pop(SESSION_USER_KEY, None)
+    session.pop(SESSION_ADMIN_LOGIN_NEXT, None)
+    # 主站登出时一并结束「管理台口令登录」session，避免仍持有 SESSION_ADMIN_KEY
+    clear_admin_session()
     return jsonify({'success': True}), 200
 
 
@@ -151,7 +182,8 @@ def email_login_request():
 
 
 @auth_bp.route('/api/auth/email/verify', methods=['POST'])
-@limiter.limit('30 per minute')
+@limiter.limit('30 per minute', key_func=get_remote_address)
+@limiter.limit('8 per minute', key_func=_email_verify_rate_limit_key)
 def email_login_verify():
     if not settings.EMAIL_AUTH_CONFIGURED:
         return jsonify({'error': 'email login is not configured on this server'}), 503
@@ -170,9 +202,12 @@ def email_login_verify():
         local,
         None,
     )
+    next_after_login = session.pop(SESSION_ADMIN_LOGIN_NEXT, None)
     session.clear()
     session.permanent = True
     session[SESSION_USER_KEY] = uid
     session.modified = True
     log.info('Email login verify success: user_id=%s', uid)
+    if next_after_login == '/admin' and is_admin():
+        return jsonify({'success': True, 'redirect': '/admin'}), 200
     return jsonify({'success': True}), 200

@@ -108,9 +108,18 @@ function getCurrentPendingCount() {
     return state ? state.pendingCount : 0;
 }
 
+/** 管理台只读查看：与 adminBrowsingUserId 配合，非空时拉取 /api/admin/conversations 并隐藏输入区 */
+let adminInspectConversationId = null;
+let adminBrowsingUserId = null;
+let adminBrowsingUserEmail = '';
+
 /** 单条会话 API（支持 message_limit / before_message_id 分页）；匿名身份由服务端 Cookie session 绑定，勿传 user_id */
 function conversationDetailUrl(conversationId, query = {}) {
-    const base = `/api/conversations/${encodeURIComponent(conversationId)}`;
+    const useAdmin =
+        adminInspectConversationId && conversationId === adminInspectConversationId;
+    const base = useAdmin
+        ? `/api/admin/conversations/${encodeURIComponent(conversationId)}`
+        : `/api/conversations/${encodeURIComponent(conversationId)}`;
     const params = new URLSearchParams();
     if (query.messageLimit != null) {
         params.set('message_limit', String(query.messageLimit));
@@ -231,12 +240,35 @@ async function verifyEmailLogin() {
         await refreshAuthState();
         applyAuthView('');
         renderAuthPanel();
+        if (data.redirect && typeof data.redirect === 'string') {
+            window.location.href = data.redirect;
+            return;
+        }
         loadConversations();
     } catch (e) {
         if (msg) {
             msg.textContent = '登录失败，请检查网络';
             msg.classList.remove('login-screen-message--hidden');
         }
+    }
+}
+
+function enforceNonAdminAdminUiClosed(me) {
+    if (me && me.is_admin) {
+        return;
+    }
+    const dock = document.getElementById('adminSidebarDock');
+    if (dock) {
+        dock.hidden = true;
+    }
+    const app = document.querySelector('.app-container');
+    if (app) {
+        app.classList.remove('mobile-admin-open', 'admin-right-collapsed');
+    }
+    const needReset = !!(adminInspectConversationId || adminBrowsingUserId);
+    exitAdminBrowseMode();
+    if (needReset) {
+        startNewChat();
     }
 }
 
@@ -247,7 +279,12 @@ async function refreshAuthState() {
             'Cache-Control': 'no-cache'
         }
     });
-    const data = await response.json();
+    let data = {};
+    try {
+        data = await response.json();
+    } catch (e) {
+        data = {};
+    }
     oauthConfigured = !!data.oauth_configured;
     emailAuthConfigured = !!data.email_auth_configured;
     authConfigured = !!data.auth_configured;
@@ -255,6 +292,399 @@ async function refreshAuthState() {
         authConfigured = oauthConfigured || emailAuthConfigured;
     }
     authUser = data.authenticated && data.user ? data.user : null;
+    updateFooterAdminLink(data);
+    enforceNonAdminAdminUiClosed(data);
+}
+
+function updateFooterAdminLink(data) {
+    const el = document.getElementById('footerAdminLink');
+    if (!el) {
+        return;
+    }
+    const on = !!(data && data.show_admin_link);
+    el.hidden = !on;
+}
+
+function consumeAdminDeepLink() {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('admin') !== '1') {
+            return;
+        }
+        params.delete('admin');
+        const q = params.toString();
+        window.history.replaceState(
+            {},
+            '',
+            window.location.pathname + (q ? `?${q}` : '') + window.location.hash
+        );
+    } catch (e) {
+        /* ignore */
+    }
+}
+
+function bindFooterAdminLink() {
+    const el = document.getElementById('footerAdminLink');
+    if (!el || el.dataset.adminWired === '1') {
+        return;
+    }
+    el.dataset.adminWired = '1';
+    el.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        toggleAdminWorkspace();
+    });
+}
+
+function toggleAdminWorkspace() {
+    const dock = document.getElementById('adminSidebarDock');
+    if (!dock) {
+        return;
+    }
+    if (!dock.hidden) {
+        closeAdminWorkspace();
+        return;
+    }
+    void (async () => {
+        try {
+            if (!authConfigured) {
+                await refreshAuthState();
+                let meR = await apiFetch('/api/me', { cache: 'no-store' });
+                let me = await meR.json();
+                if (!me.is_admin) {
+                    const input = document.getElementById('messageInput');
+                    const secret = input ? (input.value || '').trim() : '';
+                    if (!secret) {
+                        return;
+                    }
+                    const lr = await apiFetch('/api/admin/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ secret })
+                    });
+                    if (!lr.ok) {
+                        return;
+                    }
+                    if (input) {
+                        input.value = '';
+                        input.style.height = '44px';
+                    }
+                    syncSendBtn();
+                    await refreshAuthState();
+                    meR = await apiFetch('/api/me', { cache: 'no-store' });
+                    me = await meR.json();
+                    if (!me.is_admin) {
+                        return;
+                    }
+                }
+                dock.hidden = false;
+                const app = document.querySelector('.app-container');
+                if (app) {
+                    if (isMobileViewport()) {
+                        app.classList.add('mobile-admin-open');
+                    } else {
+                        app.classList.remove('mobile-admin-open');
+                    }
+                }
+                switchAdminTab('overview');
+                loadAdminOverviewMetrics();
+                return;
+            }
+            const r = await apiFetch('/api/me', { cache: 'no-store' });
+            const me = await r.json();
+            if (!me.is_admin) {
+                window.location.href = '/admin';
+                return;
+            }
+            dock.hidden = false;
+            const app = document.querySelector('.app-container');
+            if (app) {
+                if (isMobileViewport()) {
+                    app.classList.add('mobile-admin-open');
+                } else {
+                    app.classList.remove('mobile-admin-open');
+                }
+            }
+            switchAdminTab('overview');
+            loadAdminOverviewMetrics();
+        } catch (e) {
+            if (authConfigured) {
+                window.location.href = '/admin';
+            }
+        }
+    })();
+}
+
+function closeAdminWorkspace() {
+    const dock = document.getElementById('adminSidebarDock');
+    if (dock) {
+        dock.hidden = true;
+    }
+    const app = document.querySelector('.app-container');
+    if (app) {
+        app.classList.remove('mobile-admin-open', 'admin-right-collapsed');
+    }
+    const needReset = !!(adminInspectConversationId || adminBrowsingUserId);
+    exitAdminBrowseMode();
+    if (needReset) {
+        startNewChat();
+    }
+}
+
+function toggleAdminRightPanelCollapsed() {
+    if (isMobileViewport()) {
+        return;
+    }
+    const app = document.querySelector('.app-container');
+    if (!app) {
+        return;
+    }
+    app.classList.toggle('admin-right-collapsed');
+}
+
+function switchAdminTab(tab) {
+    const overview = document.getElementById('adminPanelOverview');
+    const users = document.getElementById('adminPanelUsers');
+    const bOverview = document.getElementById('adminTabBtnOverview');
+    const bUsers = document.getElementById('adminTabBtnUsers');
+    const onOverview = tab === 'overview';
+    if (overview) overview.hidden = !onOverview;
+    if (users) users.hidden = onOverview;
+    if (bOverview) bOverview.classList.toggle('admin-sidebar-tab--active', onOverview);
+    if (bUsers) bUsers.classList.toggle('admin-sidebar-tab--active', !onOverview);
+    if (!onOverview) {
+        loadAdminUsersList();
+    }
+}
+
+async function loadAdminOverviewMetrics() {
+    const grid = document.getElementById('adminMetricsGrid');
+    const pre = document.getElementById('adminMetricsApp');
+    const secretBtn = document.getElementById('adminSecretLogoutBtn');
+    if (grid) {
+        grid.innerHTML = '<span class="admin-loading-text">加载中…</span>';
+    }
+    if (pre) {
+        pre.textContent = '';
+    }
+    try {
+        const meR = await apiFetch('/api/me', { cache: 'no-store' });
+        const me = await meR.json();
+        if (secretBtn) {
+            secretBtn.hidden = !me.secret_login_available;
+        }
+        const r = await apiFetch('/api/admin/metrics', { cache: 'no-store' });
+        if (!r.ok) {
+            if (grid) grid.innerHTML = '<span class="admin-loading-text">无权限或加载失败</span>';
+            return;
+        }
+        const payload = await r.json();
+        const db = payload.database || {};
+        const items = [
+            ['用户数', db.total_users],
+            ['会话总数', db.total_conversations],
+            ['消息总数', db.total_messages],
+            ['会话涉及用户数', db.distinct_conversation_user_ids],
+            ['未过期邮箱验证码', db.pending_email_login_challenges]
+        ];
+        if (grid) {
+            grid.innerHTML = items.map(([k, v]) =>
+                `<div class="admin-metric"><div class="admin-metric-k">${k}</div><div class="admin-metric-v">${v}</div></div>`
+            ).join('');
+        }
+        if (pre) {
+            const app = payload.app || {};
+            const prov = db.user_identities_by_provider || {};
+            pre.textContent = `${JSON.stringify(app, null, 2)}\n\n身份来源计数：\n${JSON.stringify(prov, null, 2)}`;
+        }
+    } catch (e) {
+        console.warn('loadAdminOverviewMetrics', e);
+        if (grid) grid.innerHTML = '<span class="admin-loading-text">加载失败</span>';
+    }
+}
+
+function getAdminUserSortValue() {
+    const sel = document.getElementById('adminUserSortSelect');
+    const v = sel && sel.value ? String(sel.value).trim() : '';
+    const allowed = new Set([
+        'recent_activity',
+        'message_volume',
+        'conversation_count',
+        'signup',
+        'email'
+    ]);
+    return allowed.has(v) ? v : 'recent_activity';
+}
+
+async function loadAdminUsersList() {
+    const input = document.getElementById('adminUserSearchInput');
+    const box = document.getElementById('adminUserResults');
+    const q = input ? (input.value || '').trim() : '';
+    const sort = getAdminUserSortValue();
+    if (!box) {
+        return;
+    }
+    box.innerHTML = '<div class="empty-state">加载中…</div>';
+    try {
+        const r = await apiFetch(
+            `/api/admin/users?${new URLSearchParams({ q, sort, limit: '80' })}`,
+            { cache: 'no-store' }
+        );
+        if (!r.ok) {
+            box.innerHTML = '<div class="empty-state">请求失败</div>';
+            return;
+        }
+        const data = await r.json();
+        const users = data.users || [];
+        if (!users.length) {
+            box.innerHTML = '<div class="empty-state">无用户</div>';
+            return;
+        }
+        box.innerHTML = '';
+        users.forEach((u) => {
+            const row = document.createElement('button');
+            row.type = 'button';
+            row.className = 'admin-user-pick-row';
+            const em = (u.email || '').trim() || '(无邮箱)';
+            const nm = (u.display_name || '').trim();
+            const title = nm ? `${em} — ${nm}` : em;
+            const sub = [];
+            if (u.last_message_at) {
+                sub.push(`最近消息 ${u.last_message_at.slice(0, 10)}`);
+            }
+            sub.push(`${u.message_count != null ? u.message_count : 0} 条消息`);
+            sub.push(`${u.conversation_count != null ? u.conversation_count : 0} 个会话`);
+            row.innerHTML = `<span class="admin-user-pick-title"></span><span class="admin-user-pick-meta"></span>`;
+            row.querySelector('.admin-user-pick-title').textContent = title;
+            row.querySelector('.admin-user-pick-meta').textContent = sub.join(' · ');
+            row.addEventListener('click', () => adminSelectUser(u));
+            box.appendChild(row);
+        });
+    } catch (e) {
+        console.warn('loadAdminUsersList', e);
+        box.innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
+function syncAdminBrowseChrome() {
+    const bar = document.getElementById('adminUserBrowseBar');
+    const barLabel = document.getElementById('adminUserBrowseBarLabel');
+    if (bar) {
+        bar.hidden = !adminBrowsingUserId;
+    }
+    if (barLabel && adminBrowsingUserId) {
+        const em = (adminBrowsingUserEmail || '').trim();
+        const text = em
+            ? `正在代管：${em}（${adminBrowsingUserId}）`
+            : `正在代管用户：${adminBrowsingUserId}`;
+        barLabel.textContent = text;
+        barLabel.title = text;
+    } else if (barLabel) {
+        barLabel.title = '';
+    }
+}
+
+async function adminSelectUser(u) {
+    adminBrowsingUserId = u.id;
+    adminBrowsingUserEmail = (u.email || '').trim();
+    adminInspectConversationId = null;
+    const chat = document.getElementById('chatContainer');
+    if (chat) {
+        chat.classList.remove('admin-inspect-mode');
+        chat.classList.add('admin-browsing-user');
+    }
+    const dock = document.getElementById('composerDock');
+    if (dock) {
+        dock.hidden = false;
+    }
+    const app = document.querySelector('.app-container');
+    if (app) {
+        app.classList.add('admin-browsing-user');
+    }
+    syncAdminBrowseChrome();
+    setCurrentConversation(null);
+    const messagesArea = document.getElementById('messagesArea');
+    if (messagesArea) {
+        messagesArea.innerHTML =
+            '<div class="messages-area-loading" role="status">请从左侧选择该用户的会话（只读）</div>';
+    }
+    updateCurrentSourceTitle();
+    applyComposerDockLayout();
+    await loadConversations();
+    updateActiveConversation();
+}
+
+function initAdminWorkspaceUi() {
+    const closeBtn = document.getElementById('adminWorkspaceClose');
+    if (closeBtn && !closeBtn.dataset.wired) {
+        closeBtn.dataset.wired = '1';
+        closeBtn.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            closeAdminWorkspace();
+        });
+    }
+    const railCollapse = document.getElementById('adminSidebarCollapseBtn');
+    if (railCollapse && !railCollapse.dataset.wired) {
+        railCollapse.dataset.wired = '1';
+        railCollapse.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            toggleAdminRightPanelCollapsed();
+        });
+    }
+    const tOverview = document.getElementById('adminTabBtnOverview');
+    const tUsers = document.getElementById('adminTabBtnUsers');
+    if (tOverview && !tOverview.dataset.wired) {
+        tOverview.dataset.wired = '1';
+        tOverview.addEventListener('click', () => {
+            switchAdminTab('overview');
+            loadAdminOverviewMetrics();
+        });
+    }
+    if (tUsers && !tUsers.dataset.wired) {
+        tUsers.dataset.wired = '1';
+        tUsers.addEventListener('click', () => {
+            switchAdminTab('users');
+        });
+    }
+    const sortSel = document.getElementById('adminUserSortSelect');
+    if (sortSel && !sortSel.dataset.wired) {
+        sortSel.dataset.wired = '1';
+        sortSel.addEventListener('change', () => loadAdminUsersList());
+    }
+    const searchBtn = document.getElementById('adminUserSearchBtn');
+    if (searchBtn && !searchBtn.dataset.wired) {
+        searchBtn.dataset.wired = '1';
+        searchBtn.addEventListener('click', () => loadAdminUsersList());
+    }
+    const secretBtn = document.getElementById('adminSecretLogoutBtn');
+    if (secretBtn && !secretBtn.dataset.wired) {
+        secretBtn.dataset.wired = '1';
+        secretBtn.addEventListener('click', async () => {
+            try {
+                await apiFetch('/api/admin/logout', { method: 'POST' });
+            } catch (e) {
+                /* ignore */
+            }
+            await refreshAuthState();
+            await loadAdminOverviewMetrics();
+        });
+    }
+    const exitBrowse = document.getElementById('adminUserBrowseExit');
+    if (exitBrowse && !exitBrowse.dataset.wired) {
+        exitBrowse.dataset.wired = '1';
+        exitBrowse.addEventListener('click', async () => {
+            exitAdminBrowseMode();
+            setCurrentConversation(null);
+            const messagesArea = document.getElementById('messagesArea');
+            if (messagesArea) {
+                messagesArea.innerHTML = '';
+            }
+            await loadConversations();
+            updateCurrentSourceTitle();
+            applyComposerDockLayout();
+        });
+    }
 }
 
 function getOAuthReturnStatus() {
@@ -343,7 +773,7 @@ function renderAuthPanel() {
     panel.innerHTML = `
         <div class="sidebar-capsule sidebar-capsule--auth">
             <div class="auth-panel-inner">
-                <span class="auth-panel-user" title="${escapeHtml(title)}">${escapeHtml(label)}</span>
+                <span class="auth-panel-user auth-panel-user--wrap" title="${escapeHtml(title)}">${escapeHtml(label)}</span>
                 <button type="button" class="auth-panel-logout" id="authLogoutBtn">退出</button>
             </div>
         </div>`;
@@ -500,6 +930,9 @@ function clearAllConversationDetailCaches() {
 
 /** 将当前内存中的会话详情写回 localStorage（加载更早消息后等） */
 function persistConversationDetailCacheFromState(conversationId) {
+    if (adminInspectConversationId || adminBrowsingUserId) {
+        return;
+    }
     const state = getConversationState(conversationId);
     if (!state || !state.serverConversation) {
         return;
@@ -557,10 +990,33 @@ function mergeOlderServerMessages(existing, olderBatch) {
     return Array.from(byId.values()).sort((a, b) => Number(a.id) - Number(b.id));
 }
 
+function maxNumericMessageId(messages) {
+    let max = 0;
+    for (const m of messages || []) {
+        const n = Number(m && m.id);
+        if (Number.isFinite(n) && n > max) {
+            max = n;
+        }
+    }
+    return max;
+}
+
+/** 为本地回合分配排序键：与服务器消息的 id 混排时，失败回合仍排在当时「最后一条已持久化消息」之后、后续成功消息之前。 */
 function addLocalMessages(conversationId, messages) {
     const state = getConversationState(conversationId);
     if (!state) return;
-    state.localMessages.push(...messages);
+    const serverMsgs = Array.isArray(state.serverConversation && state.serverConversation.messages)
+        ? state.serverConversation.messages
+        : [];
+    const maxId = maxNumericMessageId(serverMsgs);
+    state.localBlockSortCounter = (state.localBlockSortCounter || 0) + 1;
+    const c = state.localBlockSortCounter;
+    const keyed = (messages || []).map((msg) => {
+        const roleOff = msg.role === 'assistant' ? 2e-6 : 1e-6;
+        const _sortKey = maxId + c * 3e-6 + roleOff;
+        return { ...msg, _sortKey };
+    });
+    state.localMessages.push(...keyed);
 }
 
 function removeLocalMessagesByRequest(conversationId, requestId, options = {}) {
@@ -646,7 +1102,16 @@ function applyStreamingAssistantUpdate(conversationId, requestId, fullText) {
     }
     bubble.className = 'message-bubble message-bubble-md message-bubble-streaming';
     bubble.innerHTML = renderAssistantMarkdown(fullText);
+    scheduleAssistantMermaid(bubble, 320);
     scrollMessagesToBottom();
+}
+
+function messageViewSortKey(m) {
+    if (m && m._sortKey != null) {
+        return Number(m._sortKey);
+    }
+    const n = Number(m && m.id);
+    return Number.isFinite(n) ? n : 0;
 }
 
 function getConversationMessagesForView(conversationId) {
@@ -655,7 +1120,9 @@ function getConversationMessagesForView(conversationId) {
     const serverMessages = Array.isArray(state.serverConversation && state.serverConversation.messages)
         ? state.serverConversation.messages
         : [];
-    return serverMessages.concat(state.localMessages);
+    const merged = serverMessages.concat(state.localMessages);
+    merged.sort((a, b) => messageViewSortKey(a) - messageViewSortKey(b));
+    return merged;
 }
 
 function shouldCenterComposer() {
@@ -710,6 +1177,12 @@ function applyComposerDockLayout(options = {}) {
     const line1 = document.getElementById('emptyComposerGreetingLine1');
     const greet = document.getElementById('emptyComposerGreeting');
     if (!container || !dock) {
+        return;
+    }
+    if (adminBrowsingUserId || adminInspectConversationId) {
+        container.classList.remove('chat-container--composer-centered');
+        dock.style.transition = '';
+        dock.style.transform = '';
         return;
     }
 
@@ -860,6 +1333,9 @@ document.addEventListener('DOMContentLoaded', async function() {
     }
     initTheme();
     await initAuth();
+    consumeAdminDeepLink();
+    bindFooterAdminLink();
+    initAdminWorkspaceUi();
     initSidebarState();
     syncSendBtn();
     setupEventListeners();
@@ -1063,6 +1539,376 @@ function wrapAssistantTables(html) {
     } catch (e) {
         return html;
     }
+}
+
+/** 与 script.js 同源的查询串，便于部署更新后一并刷新 vendor 缓存 */
+function getVendorMermaidScriptUrl() {
+    const el = document.querySelector('script[src*="script.js"]');
+    if (el && el.src) {
+        try {
+            const u = new URL(el.src, window.location.href);
+            const p = u.pathname.replace(/\/script\.js$/i, '/vendor/mermaid.min.js');
+            return p + (u.search || '');
+        } catch (e) {
+            /* ignore */
+        }
+    }
+    return '/static/vendor/mermaid.min.js';
+}
+
+let mermaidScriptLoadPromise = null;
+function loadMermaidLibrary() {
+    if (typeof mermaid !== 'undefined') {
+        return Promise.resolve(window.mermaid);
+    }
+    if (mermaidScriptLoadPromise) {
+        return mermaidScriptLoadPromise;
+    }
+    mermaidScriptLoadPromise = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = getVendorMermaidScriptUrl();
+        s.async = true;
+        s.onload = () => {
+            if (typeof mermaid !== 'undefined') {
+                resolve(window.mermaid);
+            } else {
+                mermaidScriptLoadPromise = null;
+                reject(new Error('mermaid global missing'));
+            }
+        };
+        s.onerror = () => {
+            mermaidScriptLoadPromise = null;
+            console.warn('Mermaid 脚本加载失败（请确认已部署 static/vendor/mermaid.min.js）:', s.src);
+            reject(new Error('mermaid script failed to load'));
+        };
+        document.head.appendChild(s);
+    });
+    return mermaidScriptLoadPromise;
+}
+
+let mermaidConfigApplied = false;
+function ensureMermaidInitialized() {
+    if (typeof mermaid === 'undefined' || typeof mermaid.initialize !== 'function') {
+        return null;
+    }
+    if (!mermaidConfigApplied) {
+        // 始终用浅色 Mermaid 主题：dark 主题下常出现「浅色节点填充 + 浅色 label」对比度崩溃（如过渡态粉底灰字）。
+        // 图表在 .assistant-mermaid-wrap 内相当于浅色卡片，与暗色聊天背景分层清晰、字可读。
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: 'default',
+            securityLevel: 'strict'
+        });
+        mermaidConfigApplied = true;
+    }
+    return mermaid;
+}
+
+/** 渲染前把源码挂在元素上，解析失败时可展示给用户（问题多在模型输出的语法，而非前端） */
+const assistantMermaidSourceByEl = new WeakMap();
+
+function assistantCreateMermaidWrapElement(source) {
+    const normalized = String(source || '').replace(/\r\n/g, '\n').trim();
+    if (!normalized) {
+        return null;
+    }
+    const wrap = document.createElement('div');
+    wrap.className = 'assistant-mermaid-wrap';
+    const graph = document.createElement('div');
+    graph.className = 'mermaid';
+    graph.textContent = normalized;
+    assistantMermaidSourceByEl.set(graph, normalized);
+    wrap.appendChild(graph);
+    return wrap;
+}
+
+/**
+ * 识别模型直接输出的「无 ```mermaid 围栏」的源码（整段落在单个 p / pre 里）。
+ */
+function assistantTextLooksLikeMermaidSource(raw) {
+    const s = String(raw || '')
+        .replace(/\r\n/g, '\n')
+        .trim();
+    if (!s || s.length > 120000) {
+        return false;
+    }
+    const head = s.slice(0, 1200).trimStart();
+    if (
+        /^\s*(?:sequenceDiagram\b|classDiagram\b|stateDiagram-v2\b|stateDiagram\b|erDiagram\b|gantt\b|pie\b|gitgraph\b|journey\b|mindmap\b|timeline\b|sankey-beta\b|block-beta\b)/i.test(
+            head
+        )
+    ) {
+        return true;
+    }
+    if (/^\s*(?:graph|flowchart)\s+[A-Za-z]{1,2}\b/i.test(head)) {
+        return true;
+    }
+    const lines = s
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+    if (
+        lines.length >= 2 &&
+        /^(?:graph|flowchart)$/i.test(lines[0]) &&
+        /^[A-Za-z]{1,2}$/.test(lines[1])
+    ) {
+        return true;
+    }
+    return false;
+}
+
+function assistantParagraphIsMermaidPlainHost(p) {
+    if (!p || p.tagName !== 'P') {
+        return false;
+    }
+    for (const n of p.childNodes) {
+        if (n.nodeType === 3) {
+            continue;
+        }
+        if (n.nodeType === 1 && n.tagName === 'BR') {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+/**
+ * 将裸露的 Mermaid 段落/pre 转为 .assistant-mermaid-wrap（在 rewriteMermaidCodeBlocksToDivs 之后执行）。
+ */
+function rewriteBareMermaidBlocksToDivs(html) {
+    if (!html || typeof html !== 'string') {
+        return html;
+    }
+    try {
+        const tpl = document.createElement('template');
+        tpl.innerHTML = html.trim();
+        const root = tpl.content;
+
+        root.querySelectorAll('p').forEach((p) => {
+            if (p.closest('.assistant-mermaid-wrap')) {
+                return;
+            }
+            if (!assistantParagraphIsMermaidPlainHost(p)) {
+                return;
+            }
+            const source = (p.textContent || '').replace(/\r\n/g, '\n').trim();
+            if (!assistantTextLooksLikeMermaidSource(source)) {
+                return;
+            }
+            const wrap = assistantCreateMermaidWrapElement(source);
+            if (wrap) {
+                p.replaceWith(wrap);
+            }
+        });
+
+        root.querySelectorAll('pre').forEach((pre) => {
+            if (pre.closest('.assistant-mermaid-wrap')) {
+                return;
+            }
+            const code = pre.querySelector(':scope > code');
+            let source = '';
+            if (code) {
+                const cls = (code.getAttribute('class') || '').toLowerCase();
+                if (/\blanguage-mermaid\b/.test(cls) || /\blang-mermaid\b/.test(cls)) {
+                    return;
+                }
+                source = (code.textContent || '').replace(/\r\n/g, '\n').trim();
+            } else {
+                source = (pre.textContent || '').replace(/\r\n/g, '\n').trim();
+            }
+            if (!assistantTextLooksLikeMermaidSource(source)) {
+                return;
+            }
+            const wrap = assistantCreateMermaidWrapElement(source);
+            if (wrap) {
+                pre.replaceWith(wrap);
+            }
+        });
+
+        const out = document.createElement('div');
+        out.appendChild(root);
+        return out.innerHTML;
+    } catch (e) {
+        console.warn('Bare Mermaid rewrite failed:', e);
+        return html;
+    }
+}
+
+/**
+ * 将 GFM ```mermaid 代码块转为 Mermaid 所需的 div（在 DOMPurify 之后执行，源为纯文本）。
+ */
+function rewriteMermaidCodeBlocksToDivs(html) {
+    if (!html || typeof html !== 'string') {
+        return html;
+    }
+    if (!html.includes('language-mermaid') && !html.includes('lang-mermaid')) {
+        return html;
+    }
+    try {
+        const tpl = document.createElement('template');
+        tpl.innerHTML = html.trim();
+        const root = tpl.content;
+        root.querySelectorAll('pre > code').forEach((code) => {
+            const cls = (code.getAttribute('class') || '').toLowerCase();
+            if (!/\blanguage-mermaid\b/.test(cls) && !/\blang-mermaid\b/.test(cls)) {
+                return;
+            }
+            const pre = code.parentElement;
+            if (!pre || pre.tagName !== 'PRE') {
+                return;
+            }
+            const source = (code.textContent || '').replace(/\r\n/g, '\n').trim();
+            const wrap = assistantCreateMermaidWrapElement(source);
+            if (wrap) {
+                pre.replaceWith(wrap);
+            }
+        });
+        const out = document.createElement('div');
+        out.appendChild(root);
+        return out.innerHTML;
+    } catch (e) {
+        console.warn('Mermaid block rewrite failed:', e);
+        return html;
+    }
+}
+
+const assistantMermaidTimers = new WeakMap();
+
+function scheduleAssistantMermaid(root, debounceMs) {
+    if (!root || !root.querySelector || !root.querySelector('.assistant-mermaid-wrap .mermaid')) {
+        return;
+    }
+    const run = () => {
+        assistantMermaidTimers.delete(root);
+        void runAssistantMermaidHydrate(root);
+    };
+    if (debounceMs <= 0) {
+        queueMicrotask(run);
+        return;
+    }
+    const prev = assistantMermaidTimers.get(root);
+    if (prev) {
+        clearTimeout(prev);
+    }
+    assistantMermaidTimers.set(root, setTimeout(run, debounceMs));
+}
+
+/** 判断 Mermaid 是否已产出可展示输出（内联 SVG，或 sandbox 模式下的 iframe） */
+function assistantMermaidDiagramPresent(graphEl) {
+    if (!graphEl) {
+        return false;
+    }
+    if (graphEl.querySelector('svg')) {
+        return true;
+    }
+    const fe = graphEl.firstElementChild;
+    return !!(fe && fe.tagName === 'IFRAME');
+}
+
+/**
+ * 仅当 Mermaid 在容器内画出了「语法错误」炸弹页时才视为失败。
+ * 不能用「没有 svg」当失败：部分主题/时机下成功图的检测若误判，会错误挂上保底 <details>，盖住正常图或造成重复说明。
+ */
+function assistantMermaidShowsSyntaxErrorUi(graphEl) {
+    if (!graphEl) {
+        return false;
+    }
+    const svg = graphEl.querySelector('svg');
+    if (!svg) {
+        return false;
+    }
+    const blob = (svg.textContent || '').toLowerCase();
+    if (blob.includes('syntax error')) {
+        return true;
+    }
+    return !!(svg.querySelector('path.error-icon') || svg.querySelector('.error-icon'));
+}
+
+function attachAssistantMermaidSyntaxFallback(wrap, source) {
+    if (!wrap || !source || wrap.querySelector(':scope > .assistant-mermaid-fallback')) {
+        return;
+    }
+    const det = document.createElement('details');
+    det.className = 'assistant-mermaid-fallback';
+    const sum = document.createElement('summary');
+    sum.textContent = '无法解析该图（多为模型输出的 Mermaid 语法错误）。展开查看原始代码';
+    const pre = document.createElement('pre');
+    pre.className = 'assistant-mermaid-source';
+    pre.textContent = source;
+    det.appendChild(sum);
+    det.appendChild(pre);
+    wrap.appendChild(det);
+}
+
+function finalizeAssistantMermaidNodes(nodes, options = {}) {
+    const forceIfNoDiagram = !!options.forceIfNoDiagram;
+    for (const el of nodes) {
+        if (!el.isConnected) {
+            continue;
+        }
+        const wrap = el.parentElement;
+        const src = assistantMermaidSourceByEl.get(el);
+        if (!wrap || !src) {
+            continue;
+        }
+        if (wrap.querySelector(':scope > .assistant-mermaid-fallback')) {
+            continue;
+        }
+        const hasDiagram = assistantMermaidDiagramPresent(el);
+        const syntaxErr = assistantMermaidShowsSyntaxErrorUi(el);
+        const stuckRaw =
+            !hasDiagram &&
+            el.childElementCount === 0 &&
+            (el.textContent || '').trim().length > 0;
+        const needsFallback =
+            syntaxErr || (forceIfNoDiagram && !hasDiagram) || (!syntaxErr && stuckRaw);
+        if (needsFallback) {
+            attachAssistantMermaidSyntaxFallback(wrap, src);
+            if (stuckRaw) {
+                el.textContent = '';
+            }
+        }
+    }
+}
+
+async function runAssistantMermaidHydrate(root) {
+    if (!root || !root.isConnected) {
+        return;
+    }
+    let nodes = [...root.querySelectorAll('.assistant-mermaid-wrap > .mermaid')].filter(
+        (el) => el.isConnected && !assistantMermaidDiagramPresent(el)
+    );
+    if (!nodes.length) {
+        return;
+    }
+    try {
+        await loadMermaidLibrary();
+    } catch (e) {
+        console.warn('Mermaid load failed:', e);
+        finalizeAssistantMermaidNodes(nodes, { forceIfNoDiagram: true });
+        return;
+    }
+    const m = ensureMermaidInitialized();
+    if (!m || typeof m.run !== 'function') {
+        finalizeAssistantMermaidNodes(nodes, { forceIfNoDiagram: true });
+        return;
+    }
+    nodes = nodes.filter((el) => el.isConnected);
+    for (const el of nodes) {
+        el.removeAttribute('data-processed');
+    }
+    if (!nodes.length) {
+        return;
+    }
+    try {
+        await m.run({ nodes });
+    } catch (e) {
+        console.warn('Mermaid render failed:', e);
+        finalizeAssistantMermaidNodes(nodes, { forceIfNoDiagram: true });
+        return;
+    }
+    finalizeAssistantMermaidNodes(nodes, { forceIfNoDiagram: false });
 }
 
 /**
@@ -1326,7 +2172,9 @@ function renderAssistantMarkdown(text) {
         }
         html = assistantRestoreBracketMathPlaceholders(String(html), bracket.mathEntries);
         html = sanitizeAssistantHtml(purify, html);
-        return wrapAssistantTables(html);
+        html = wrapAssistantTables(html);
+        html = rewriteMermaidCodeBlocksToDivs(html);
+        return rewriteBareMermaidBlocksToDivs(html);
     } catch (e) {
         console.error('Markdown render failed:', e);
         const d = document.createElement('div');
@@ -1641,6 +2489,49 @@ async function loadConversations() {
     }
     loadConversationsInFlight = (async () => {
         try {
+            if (adminBrowsingUserId) {
+                renderSidebarStatus('管理员查看 · 以下为该用户会话');
+                const response = await apiFetch(
+                    `/api/admin/users/${encodeURIComponent(adminBrowsingUserId)}/conversations`,
+                    { cache: 'no-store' }
+                );
+                const container = document.getElementById('conversationsList');
+                if (!container) {
+                    return;
+                }
+                if (response.status === 429) {
+                    renderSidebarStatus('请求过于频繁，请稍后再试');
+                    return;
+                }
+                if (!response.ok) {
+                    container.innerHTML = '<div class="empty-state">加载失败</div>';
+                    return;
+                }
+                const data = await response.json();
+                const convs = data.conversations || {};
+                const entries = Object.entries(convs);
+                entries.sort(
+                    (a, b) => conversationActivityTimeMs(b[1]) - conversationActivityTimeMs(a[1])
+                );
+                if (entries.length) {
+                    container.innerHTML = '';
+                    const topConv = entries[0] && entries[0][1];
+                    defaultSourceIdForNewChat = topConv && topConv.source_id
+                        ? String(topConv.source_id).trim()
+                        : '';
+                    entries.forEach(([id, conv]) => {
+                        container.appendChild(
+                            createConversationItem(id, conv, { adminBrowse: true })
+                        );
+                    });
+                } else {
+                    container.innerHTML = '<div class="empty-state">该用户暂无会话</div>';
+                    defaultSourceIdForNewChat = '';
+                }
+                syncNewChatDefaultSource({ force: false });
+                updateActiveConversation();
+                return;
+            }
             if (authConfigured && !authUser) {
                 const container = document.getElementById('conversationsList');
                 if (container) {
@@ -1702,9 +2593,12 @@ async function loadConversations() {
     return loadConversationsInFlight;
 }
 
-function createConversationItem(id, conv) {
+function createConversationItem(id, conv, options = {}) {
+    const adminBrowse = !!(options && options.adminBrowse);
     const div = document.createElement('div');
-    div.className = 'conversation-item';
+    div.className = adminBrowse
+        ? 'conversation-item conversation-item--admin-browse'
+        : 'conversation-item';
     div.dataset.convId = id;
     if (id === currentConversationId) div.classList.add('active');
 
@@ -1716,19 +2610,106 @@ function createConversationItem(id, conv) {
     label.className = 'conversation-item-label';
     label.textContent = difyTitle || '新对话';
 
-    const delBtn = document.createElement('button');
-    delBtn.className = 'delete-btn';
-    delBtn.textContent = '×';
-    delBtn.addEventListener('click', (e) => deleteConversation(id, e));
-
     div.addEventListener('click', () => switchConversation(id));
     div.appendChild(label);
-    div.appendChild(delBtn);
+    if (!adminBrowse) {
+        const delBtn = document.createElement('button');
+        delBtn.className = 'delete-btn';
+        delBtn.textContent = '×';
+        delBtn.addEventListener('click', (e) => deleteConversation(id, e));
+        div.appendChild(delBtn);
+    }
     return div;
+}
+
+function exitAdminBrowseMode() {
+    adminInspectConversationId = null;
+    adminBrowsingUserId = null;
+    adminBrowsingUserEmail = '';
+    const chat = document.getElementById('chatContainer');
+    if (chat) {
+        chat.classList.remove('admin-inspect-mode', 'admin-browsing-user');
+    }
+    const dock = document.getElementById('composerDock');
+    if (dock) {
+        dock.hidden = false;
+    }
+    const app = document.querySelector('.app-container');
+    if (app) {
+        app.classList.remove('admin-browsing-user');
+    }
+    const bar = document.getElementById('adminUserBrowseBar');
+    if (bar) {
+        bar.hidden = true;
+    }
+    const barLabel = document.getElementById('adminUserBrowseBarLabel');
+    if (barLabel) {
+        barLabel.textContent = '';
+    }
+}
+
+async function adminLoadReadonlyConversation(conversationId) {
+    adminInspectConversationId = conversationId;
+    const chat = document.getElementById('chatContainer');
+    if (chat) {
+        chat.classList.add('admin-inspect-mode');
+    }
+    setCurrentConversation(conversationId);
+    const messagesArea = document.getElementById('messagesArea');
+    if (messagesArea) {
+        messagesArea.innerHTML = renderMessagesLoadingPlaceholder();
+    }
+    const state = getConversationState(conversationId);
+    if (state) {
+        state.loadingOlderMessages = false;
+        state.serverConversation = {
+            id: conversationId,
+            created_at: '',
+            messages: [],
+            source_id: '',
+            source_name: '',
+            dify_title: '',
+            has_more_older: false,
+            message_count_total: null
+        };
+    }
+    try {
+        const response = await apiFetch(
+            conversationDetailUrl(conversationId, { messageLimit: CONVERSATION_MESSAGE_PAGE_SIZE })
+        );
+        if (!response.ok) {
+            if (messagesArea) {
+                messagesArea.innerHTML = '<div class="messages-area-loading" role="status">无法加载会话</div>';
+            }
+            return;
+        }
+        const data = await response.json();
+        if (!data.success) {
+            if (messagesArea) {
+                messagesArea.innerHTML = '<div class="messages-area-loading" role="status">无法加载会话</div>';
+            }
+            return;
+        }
+        setConversationServerData(conversationId, data);
+        if (data.source_id) {
+            selectedSourceId = data.source_id;
+            renderSourceOptions();
+        }
+        setSourceLocked(true);
+        renderConversationView(conversationId);
+        updateCurrentSourceTitle();
+        updateActiveConversation();
+    } catch (e) {
+        console.error('adminLoadReadonlyConversation:', e);
+        if (messagesArea) {
+            messagesArea.innerHTML = '<div class="messages-area-loading" role="status">加载失败</div>';
+        }
+    }
 }
 
 // Start new chat
 function startNewChat() {
+    exitAdminBrowseMode();
     setCurrentConversation(null);
     uploadedFiles = [];
     resetComposer();
@@ -1797,6 +2778,12 @@ async function loadOlderConversationMessages(conversationId) {
 
 // Switch conversation
 async function switchConversation(conversationId) {
+    if (adminBrowsingUserId) {
+        await adminLoadReadonlyConversation(conversationId);
+        closeSidebar();
+        return;
+    }
+    exitAdminBrowseMode();
     setCurrentConversation(conversationId);
     selectedSourceId = getConversationSourceId(conversationId) || selectedSourceId;
     renderSourceOptions();
@@ -1916,6 +2903,33 @@ function updateCurrentSourceTitle() {
     if (!el) {
         return;
     }
+    if (adminBrowsingUserId) {
+        const em = (adminBrowsingUserEmail || '').trim();
+        const parts = ['管理员查看'];
+        if (em) {
+            parts.push(em);
+        } else {
+            parts.push(adminBrowsingUserId);
+        }
+        const sourceId = currentConversationId
+            ? getConversationSourceId(currentConversationId)
+            : (selectedSourceId || pickDefaultSourceIdForNewChat() || '');
+        const kbName = sourceId ? getSourceDisplayName(sourceId) : '';
+        parts.push(kbName ? `知识库 ${kbName}` : '知识库 —');
+        if (em) {
+            parts.push(adminBrowsingUserId);
+        }
+        if (currentConversationId) {
+            parts.push(`会话 ${currentConversationId}`);
+        }
+        const text = parts.join(' · ');
+        el.textContent = text;
+        el.title = text;
+        el.classList.add('main-chrome-title--wrap');
+        return;
+    }
+    el.title = '';
+    el.classList.remove('main-chrome-title--wrap');
     let label = '请选择知识库';
     if (currentConversationId) {
         const sid = getConversationSourceId(currentConversationId);
@@ -1926,12 +2940,20 @@ function updateCurrentSourceTitle() {
         label = getSourceDisplayName(selectedSourceId);
     }
     el.textContent = label;
+    if (label && label !== '请选择知识库') {
+        el.title = label;
+    } else {
+        el.title = '';
+    }
 }
 
 // Delete conversation
 async function deleteConversation(conversationId, event) {
     event.stopPropagation();
-    
+    if (adminBrowsingUserId) {
+        return;
+    }
+
     if (!confirm('确定要删除这条会话吗？')) {
         return;
     }
@@ -2067,7 +3089,14 @@ function removeFileById(fileId) {
 }
 
 // Enter 发送；Shift+Enter 换行（不拦截，交给浏览器默认插入换行）
+// 组字/选词阶段勿拦截 Enter，否则拼音选词上屏会被当成发送（见 event.isComposing）
 function handleInputKeydown(event) {
+    if (adminInspectConversationId || adminBrowsingUserId) {
+        return;
+    }
+    if (event.isComposing || event.keyCode === 229) {
+        return;
+    }
     if (event.key !== 'Enter' || event.shiftKey) {
         return;
     }
@@ -2245,6 +3274,9 @@ function failPendingMessage(convId, requestId, errorText) {
 }
 
 async function sendMessage() {
+    if (adminInspectConversationId || adminBrowsingUserId) {
+        return;
+    }
     const input = document.getElementById('messageInput');
     const message = input.value.trim();
     const filesToSend = uploadedFiles.slice();
@@ -2506,6 +3538,7 @@ function renderMessageBubble(bubble, role, content, options = {}) {
         if (role === 'assistant' && typeof coerced === 'string' && coerced.length > 0) {
             bubble.classList.add('message-bubble-md', 'message-bubble-streaming');
             bubble.innerHTML = renderAssistantMarkdown(coerced);
+            scheduleAssistantMermaid(bubble, 300);
             return;
         }
         bubble.classList.add('message-bubble-pending');
@@ -2575,6 +3608,10 @@ function renderMessageBubble(bubble, role, content, options = {}) {
                 }
             });
         }
+    }
+
+    if (role === 'assistant' && bubble.classList.contains('message-bubble-md')) {
+        scheduleAssistantMermaid(bubble, options.pending ? 300 : 0);
     }
 }
 
@@ -2647,7 +3684,7 @@ function escapeHtml(text) {
 }
 
 function updateActiveConversation() {
-    document.querySelectorAll('.conversation-item').forEach(item => {
+    document.querySelectorAll('#conversationsList .conversation-item').forEach((item) => {
         item.classList.toggle('active', item.dataset.convId === currentConversationId);
     });
 }

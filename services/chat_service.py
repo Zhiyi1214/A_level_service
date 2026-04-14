@@ -1,28 +1,51 @@
 from __future__ import annotations
 
-# Dify 使用 POST + SSE；此处用 httpx.iter_lines 解析「data:」行。
+# Dify 使用 POST + SSE；用 httpx-sse 解析事件流（多行 data、注释等）。
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterator, Optional
 
 from storage import store
 
 import httpx
+from httpx_sse import SSEError, connect_sse
 
+from config import settings
 from services import image_service
+from services.http_url_guard import upstream_http_url_blocked_reason
 
 log = logging.getLogger(__name__)
+
+
+def client_safe_error(
+    production_message: str,
+    *,
+    development_detail: str | None = None,
+) -> str:
+    """非 development 不向客户端返回堆栈、URL、上游响应片段等敏感信息。"""
+    if settings.APP_ENV == 'development' and development_detail:
+        return development_detail[:500]
+    return production_message
 
 _UUID_CONV_RE = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
     re.IGNORECASE,
 )
 
-# 上游流式连接：读超时放宽，避免长回复被切断；连接/写入仍有限制
-STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=10.0)
-BLOCK_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=10.0)
+STREAM_TIMEOUT = httpx.Timeout(
+    connect=settings.HTTPX_CONNECT_TIMEOUT,
+    read=settings.HTTPX_STREAM_READ_TIMEOUT,
+    write=settings.HTTPX_STREAM_WRITE_TIMEOUT,
+    pool=settings.HTTPX_POOL_TIMEOUT,
+)
+BLOCK_TIMEOUT = httpx.Timeout(
+    connect=settings.HTTPX_CONNECT_TIMEOUT,
+    read=settings.HTTPX_BLOCK_READ_TIMEOUT,
+    write=settings.HTTPX_STREAM_WRITE_TIMEOUT,
+    pool=settings.HTTPX_POOL_TIMEOUT,
+)
 
 # ======================================================================
 # Request / response text normalization
@@ -171,7 +194,13 @@ def iter_source_api_stream(
         yield {'kind': 'error', 'message': 'source is required'}
         return
     if not source.get('api_key') and source.get('type') in {'dify_chat', 'dify_workflow'}:
-        yield {'kind': 'error', 'message': f"Missing API key env: {source.get('auth_ref')}"}
+        yield {
+            'kind': 'error',
+            'message': client_safe_error(
+                '未配置该知识库所需的服务端密钥，请联系管理员。',
+                development_detail=f"Missing API key env: {source.get('auth_ref')}",
+            ),
+        }
         return
 
     source_type = source.get('type')
@@ -198,18 +227,54 @@ def iter_source_api_stream(
                 _custom_api_image_payload(image_data),
             )
         else:
-            yield {'kind': 'error', 'message': f'Unsupported source type: {source_type}'}
+            yield {
+                'kind': 'error',
+                'message': client_safe_error(
+                    '不支持的知识库类型。',
+                    development_detail=f'Unsupported source type: {source_type}',
+                ),
+            }
     except httpx.TimeoutException:
-        yield {'kind': 'error', 'message': 'Request timed out. Check if upstream is reachable.'}
+        yield {
+            'kind': 'error',
+            'message': client_safe_error(
+                '请求上游超时，请稍后重试。',
+                development_detail='Request timed out. Check if upstream is reachable.',
+            ),
+        }
     except httpx.ConnectError as exc:
-        yield {'kind': 'error', 'message': f'Upstream connect failed: {exc!s}'[:240]}
+        yield {
+            'kind': 'error',
+            'message': client_safe_error(
+                '无法连接上游服务，请稍后重试。',
+                development_detail=f'Upstream connect failed: {exc!s}',
+            ),
+        }
     except httpx.RemoteProtocolError as exc:
-        yield {'kind': 'error', 'message': f'Upstream closed stream: {exc!s}'[:240]}
+        yield {
+            'kind': 'error',
+            'message': client_safe_error(
+                '上游连接中断，请稍后再试。',
+                development_detail=f'Upstream closed stream: {exc!s}',
+            ),
+        }
     except httpx.HTTPError as exc:
-        yield {'kind': 'error', 'message': str(exc)[:240]}
+        yield {
+            'kind': 'error',
+            'message': client_safe_error(
+                '与上游通信失败，请稍后重试。',
+                development_detail=str(exc),
+            ),
+        }
     except Exception as exc:
         log.exception("iter_source_api_stream failed")
-        yield {'kind': 'error', 'message': str(exc)[:240]}
+        yield {
+            'kind': 'error',
+            'message': client_safe_error(
+                '服务暂时不可用，请稍后重试。',
+                development_detail=str(exc),
+            ),
+        }
 
 
 def iter_chat_sse_response(
@@ -291,7 +356,7 @@ def iter_chat_sse_response(
         if stream_upstream:
             store.update_upstream_id(conversation_id, stream_upstream)
 
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         store.append_message(conversation_id, 'user', message_content, now)
         store.append_message(conversation_id, 'assistant', answer_text, now)
 
@@ -356,29 +421,57 @@ def _source_headers(source, *, include_content_type=True):
 
 
 def _request_json_httpx(api_endpoint, payload, headers):
+    if (ssrf := upstream_http_url_blocked_reason(api_endpoint)):
+        log.warning('Blocked upstream URL (ssrf): %s — %s', api_endpoint, ssrf)
+        return None, client_safe_error(
+            '上游地址未通过安全校验，请联系管理员检查知识库配置。',
+            development_detail=ssrf,
+        )
     try:
         with httpx.Client(timeout=BLOCK_TIMEOUT) as client:
             response = client.post(api_endpoint, json=payload, headers=headers)
     except httpx.TimeoutException:
-        return None, 'Request timed out (60s). Check if upstream is running.'
+        return None, client_safe_error(
+            '请求上游超时，请稍后重试。',
+            development_detail='Request timed out (60s). Check if upstream is running.',
+        )
     except httpx.HTTPError as exc:
-        return None, str(exc)[:240]
+        return None, client_safe_error(
+            '与上游通信失败，请稍后重试。',
+            development_detail=str(exc)[:240],
+        )
 
     log.debug("Upstream response %s (%d bytes)", response.status_code, len(response.text))
     if 200 <= response.status_code < 300:
         try:
             body = response.json()
             if not isinstance(body, dict):
-                return None, f'Upstream returned non-object JSON ({type(body).__name__})'
+                return None, client_safe_error(
+                    '上游返回数据格式异常。',
+                    development_detail=f'Upstream returned non-object JSON ({type(body).__name__})',
+                )
             return body, None
         except ValueError:
-            return None, 'Upstream returned invalid JSON'
+            return None, client_safe_error(
+                '上游返回无效 JSON。',
+                development_detail='Upstream returned invalid JSON',
+            )
     snippet = (response.text or '')[:200].replace('\n', ' ')
-    return None, f'HTTP {response.status_code}' + (f': {snippet}' if snippet else '')
+    dev = f'HTTP {response.status_code}' + (f': {snippet}' if snippet else '')
+    return None, client_safe_error(
+        f'上游服务返回异常（HTTP {response.status_code}）。',
+        development_detail=dev,
+    )
 
 
 def _upload_dify_file(source, user_id, file_item):
     api_endpoint = f"{source['api_url']}/files/upload"
+    if (ssrf := upstream_http_url_blocked_reason(api_endpoint)):
+        log.warning('Blocked upstream URL (ssrf): %s — %s', api_endpoint, ssrf)
+        return None, client_safe_error(
+            '上游地址未通过安全校验，请联系管理员检查知识库配置。',
+            development_detail=ssrf,
+        )
     headers = _source_headers(source, include_content_type=False)
     try:
         with httpx.Client(timeout=BLOCK_TIMEOUT) as client:
@@ -395,52 +488,43 @@ def _upload_dify_file(source, user_id, file_item):
                 headers=headers,
             )
     except httpx.TimeoutException:
-        return None, 'Upload timed out (60s).'
+        return None, client_safe_error(
+            '上传超时，请稍后重试。',
+            development_detail='Upload timed out (60s).',
+        )
     except httpx.HTTPError as exc:
-        return None, str(exc)[:240]
+        return None, client_safe_error(
+            '上传请求失败，请稍后重试。',
+            development_detail=str(exc)[:240],
+        )
 
     log.debug("Upload response %s (%d bytes)", response.status_code, len(response.text))
     if 200 <= response.status_code < 300:
         try:
             body = response.json()
         except ValueError:
-            return None, 'Upload API returned invalid JSON'
+            return None, client_safe_error(
+                '上传接口返回无效 JSON。',
+                development_detail='Upload API returned invalid JSON',
+            )
         if not isinstance(body, dict):
-            return None, f'Upload API returned non-object JSON ({type(body).__name__})'
+            return None, client_safe_error(
+                '上传接口返回格式异常。',
+                development_detail=f'Upload API returned non-object JSON ({type(body).__name__})',
+            )
         upload_file_id = str(body.get('id') or '').strip()
         if not upload_file_id:
-            return None, 'Upload API response missing file id'
+            return None, client_safe_error(
+                '上传接口未返回文件 id。',
+                development_detail='Upload API response missing file id',
+            )
         return upload_file_id, None
     snippet = (response.text or '')[:200].replace('\n', ' ')
-    return None, f'Upload failed: HTTP {response.status_code}' + (f': {snippet}' if snippet else '')
-
-
-def _iter_sse_data_objects(response: httpx.Response) -> Iterator[dict[str, Any]]:
-    """Parse Dify-style SSE lines (data: {...}) from an httpx streaming response."""
-    try:
-        for line in response.iter_lines():
-            if line is None:
-                continue
-            s = line.strip()
-            if not s or s.startswith(':'):
-                continue
-            if not s.startswith('data: '):
-                continue
-            raw = s[6:].strip()
-            if raw == '[DONE]':
-                continue
-            try:
-                obj = json.loads(raw)
-            except json.JSONDecodeError:
-                log.debug("Skip non-JSON SSE payload: %s...", raw[:80])
-                continue
-            if isinstance(obj, dict):
-                yield obj
-    except httpx.RemoteProtocolError:
-        raise
-    except Exception:
-        log.exception("SSE parse loop failed")
-        raise
+    dev = f'Upload failed: HTTP {response.status_code}' + (f': {snippet}' if snippet else '')
+    return None, client_safe_error(
+        f'上传失败（HTTP {response.status_code}）。',
+        development_detail=dev,
+    )
 
 
 def _emit_meta_from_obj(obj: dict[str, Any]) -> dict[str, Any] | None:
@@ -522,7 +606,13 @@ def _handle_dify_sse_obj(
 
     if event == 'error':
         msg = obj.get('message') or obj.get('code') or 'upstream error'
-        yield {'kind': 'error', 'message': str(msg)[:500]}
+        yield {
+            'kind': 'error',
+            'message': client_safe_error(
+                '上游返回错误，请稍后再试。',
+                development_detail=str(msg),
+            ),
+        }
         return
 
     if event == 'ping':
@@ -543,6 +633,16 @@ def _execute_dify_sse_stream(
 ) -> Iterator[dict[str, Any]]:
     headers = _source_headers(source)
     log.info("Streaming source[%s] %s: %s", source['id'], stream_label, api_endpoint)
+    if (ssrf := upstream_http_url_blocked_reason(api_endpoint)):
+        log.warning('Blocked upstream URL (ssrf): %s — %s', api_endpoint, ssrf)
+        yield {
+            'kind': 'error',
+            'message': client_safe_error(
+                '上游地址未通过安全校验，请联系管理员检查知识库配置。',
+                development_detail=ssrf,
+            ),
+        }
+        return
     workflow_acc: list[str] = []
     text_channel_lock: dict[str, Any] = {'channel': None}
     meta_cid = ''
@@ -551,34 +651,71 @@ def _execute_dify_sse_stream(
 
     try:
         with httpx.Client(timeout=STREAM_TIMEOUT) as client:
-            with client.stream('POST', api_endpoint, json=payload, headers=headers) as response:
+            with connect_sse(
+                client,
+                'POST',
+                api_endpoint,
+                json=payload,
+                headers=headers,
+            ) as event_source:
+                response = event_source.response
                 if response.status_code < 200 or response.status_code >= 300:
                     body = response.read().decode('utf-8', errors='replace')[:500]
+                    dev_msg = f'HTTP {response.status_code}: {body}'.strip()[:240]
                     yield {
                         'kind': 'error',
-                        'message': f'HTTP {response.status_code}: {body}'.strip()[:240],
+                        'message': client_safe_error(
+                            f'上游服务返回异常（HTTP {response.status_code}）。',
+                            development_detail=dev_msg,
+                        ),
                     }
                     return
-                for obj in _iter_sse_data_objects(response):
-                    for ev in _handle_dify_sse_obj(
-                        obj,
-                        workflow_text_acc=workflow_acc,
-                        text_channel_lock=text_channel_lock,
-                    ):
-                        if ev.get('kind') == 'meta':
-                            c = (ev.get('conversation_id') or '').strip()
-                            if c:
-                                meta_cid = c
-                            if ev.get('message_id') is not None:
-                                message_id = ev.get('message_id')
-                            u = ev.get('usage')
-                            if isinstance(u, dict) and u:
-                                usage = u
-                        yield ev
-                        if ev.get('kind') == 'error':
-                            return
+                try:
+                    for sse in event_source.iter_sse():
+                        raw = (sse.data or '').strip()
+                        if raw == '[DONE]':
+                            continue
+                        try:
+                            obj = json.loads(raw)
+                        except json.JSONDecodeError:
+                            log.debug("Skip non-JSON SSE payload: %s...", raw[:80])
+                            continue
+                        if not isinstance(obj, dict):
+                            continue
+                        for ev in _handle_dify_sse_obj(
+                            obj,
+                            workflow_text_acc=workflow_acc,
+                            text_channel_lock=text_channel_lock,
+                        ):
+                            if ev.get('kind') == 'meta':
+                                c = (ev.get('conversation_id') or '').strip()
+                                if c:
+                                    meta_cid = c
+                                if ev.get('message_id') is not None:
+                                    message_id = ev.get('message_id')
+                                u = ev.get('usage')
+                                if isinstance(u, dict) and u:
+                                    usage = u
+                            yield ev
+                            if ev.get('kind') == 'error':
+                                return
+                except SSEError as exc:
+                    yield {
+                        'kind': 'error',
+                        'message': client_safe_error(
+                            '上游响应不是有效的 SSE（Content-Type 或帧格式异常）。',
+                            development_detail=str(exc),
+                        ),
+                    }
+                    return
     except httpx.RemoteProtocolError as exc:
-        yield {'kind': 'error', 'message': f'Upstream closed stream: {exc!s}'[:240]}
+        yield {
+            'kind': 'error',
+            'message': client_safe_error(
+                '上游连接中断，请稍后再试。',
+                development_detail=f'Upstream closed stream: {exc!s}',
+            ),
+        }
         return
 
     yield {
@@ -630,7 +767,13 @@ def _stream_dify_chat(
                     except Exception:
                         log.exception("dify_file_cache_put failed")
             if not upload_file_id:
-                yield {'kind': 'error', 'message': upload_error or 'upload failed'}
+                yield {
+                    'kind': 'error',
+                    'message': client_safe_error(
+                        '图片上传失败，请稍后重试。',
+                        development_detail=upload_error or 'upload failed',
+                    ),
+                }
                 return
             payload['files'].append({
                 'type': 'image',

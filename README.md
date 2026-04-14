@@ -136,6 +136,8 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+`GET /api/health` 在生产环境（`FLASK_ENV=production`）只返回 `status` 与 UTC `timestamp`，避免对外暴露聚合指标；本地或 staging 若 `FLASK_ENV` 非 `production`，可加 **`?verbose=1`** 查看会话数、知识库数量等。
+
 | 入口 | 地址 |
 |------|------|
 | Nginx 代理 | http://localhost:8080 |
@@ -158,13 +160,13 @@ docker compose exec ai-assistant flask db upgrade
 | GET | `/api/me` | 当前登录态与 OAuth 是否启用 |
 | GET | `/auth/google` | 跳转 Google 授权 |
 | GET | `/auth/google/callback` | OAuth 回调（写入 Session） |
-| POST | `/auth/logout` | 清除 Session |
+| POST | `/auth/logout` | 清除主站登录 Session，并结束管理台「口令登录」态（`X-Requested-With: XMLHttpRequest`） |
 | POST | `/api/sessions` | 创建会话（锁定知识库） |
 | POST | `/api/chat` | 发送消息（支持 multipart 图片上传） |
 | GET | `/api/conversations` | 获取对话列表 |
 | GET | `/api/conversations/<id>` | 获取对话详情 |
 | DELETE | `/api/conversations/<id>` | 删除对话 |
-| GET | `/api/health` | 健康检查 |
+| GET | `/api/health` | 探活：生产环境仅返回 `status`、`timestamp`（UTC）；开发等非 production 可加 `?verbose=1` 返回会话数、知识库数量等 |
 
 ### 示例
 

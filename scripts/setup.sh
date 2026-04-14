@@ -47,7 +47,7 @@ echo ""
 echo "📝 Next steps:"
 echo "1. Edit .env file and add your Dify API key"
 echo "2. Run: source venv/bin/activate"
-echo "3. Run: python app.py"
+echo "3. Run: python dev.py"
 echo ""
 echo "Or use: ./scripts/start.sh"
 

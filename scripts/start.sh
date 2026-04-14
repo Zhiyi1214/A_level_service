@@ -85,5 +85,5 @@ echo -e "${YELLOW}Press Ctrl+C to stop the server${NC}"
 echo ""
 
 # 启动应用
-python app.py
+python dev.py
 

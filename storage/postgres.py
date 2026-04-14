@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, desc, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import selectinload
 
@@ -15,6 +15,20 @@ from extensions import db
 from models import Conversation, EmailLoginChallenge, Message, User, UserIdentity
 
 log = logging.getLogger(__name__)
+
+# LIKE 通配符转义：与 escape='\\' 配合，避免管理台搜索串中的 %、_ 被当作 SQL 通配符
+_LIKE_ESC = '\\'
+
+
+def _like_literal_contains(s: str) -> str:
+    """生成「包含子串 s」的 LIKE 模式（已转义 %、_、反斜杠）。"""
+    e = (
+        (s or '')
+        .replace(_LIKE_ESC, _LIKE_ESC * 2)
+        .replace('%', _LIKE_ESC + '%')
+        .replace('_', _LIKE_ESC + '_')
+    )
+    return f'%{e}%'
 
 
 def _to_utc(dt: datetime | str) -> datetime:
@@ -301,6 +315,7 @@ class PostgresStore:
     def put_dify_file_cache_entry(
         self, session_id: str, content_sha256: str, upload_file_id: str
     ) -> None:
+        """写入/刷新 sha→upload_file_id；Python 3.7+ dict 保序，同键先删再插会移到末尾，淘汰时丢最早插入的键。"""
         h = (content_sha256 or '').strip()
         fid = (upload_file_id or '').strip()
         if not h or not fid:
@@ -335,6 +350,43 @@ class PostgresStore:
         n = db.session.scalar(select(func.count()).select_from(Conversation))
         return int(n or 0)
 
+    def admin_metrics_snapshot(self) -> dict[str, Any]:
+        """只读聚合指标，供管理台使用（须在应用上下文中调用）。"""
+        now = datetime.now(timezone.utc)
+        total_users = int(db.session.scalar(select(func.count()).select_from(User)) or 0)
+        total_conversations = int(
+            db.session.scalar(select(func.count()).select_from(Conversation)) or 0
+        )
+        total_messages = int(
+            db.session.scalar(select(func.count()).select_from(Message)) or 0
+        )
+        _distinct_users = select(Conversation.user_id).distinct().subquery()
+        distinct_conv_users = int(
+            db.session.scalar(select(func.count()).select_from(_distinct_users)) or 0
+        )
+        pending_login_challenges = int(
+            db.session.scalar(
+                select(func.count())
+                .select_from(EmailLoginChallenge)
+                .where(EmailLoginChallenge.expires_at >= now)
+            )
+            or 0
+        )
+        rows = db.session.execute(
+            select(UserIdentity.provider, func.count())
+            .group_by(UserIdentity.provider)
+            .order_by(UserIdentity.provider.asc())
+        ).all()
+        identities_by_provider = {str(r[0]): int(r[1]) for r in rows}
+        return {
+            'total_users': total_users,
+            'total_conversations': total_conversations,
+            'total_messages': total_messages,
+            'distinct_conversation_user_ids': distinct_conv_users,
+            'pending_email_login_challenges': pending_login_challenges,
+            'user_identities_by_provider': identities_by_provider,
+        }
+
     def delete_oldest_by_user(self, user_id: str) -> bool:
         oldest_id = db.session.scalar(
             select(Conversation.id)
@@ -357,6 +409,110 @@ class PostgresStore:
             'avatar_url': u.avatar_url or '',
             'created_at': _isoformat_utc(u.created_at),
         }
+
+    def admin_list_users(
+        self,
+        q: str,
+        sort: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """管理台：可选筛选 + 多种排序（最近发消息、消息量、会话数、注册时间、邮箱）。"""
+        qstrip = (q or '').strip()
+        where = None
+        if qstrip:
+            ql = qstrip.lower()
+            where = or_(
+                func.lower(User.email).like(
+                    _like_literal_contains(ql), escape=_LIKE_ESC
+                ),
+                User.id.like(_like_literal_contains(qstrip), escape=_LIKE_ESC),
+            )
+
+        msg_agg = (
+            select(
+                Conversation.user_id.label('uid'),
+                func.max(Message.timestamp).label('last_message_at'),
+                func.count(Message.id).label('message_count'),
+            )
+            .select_from(Message)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .group_by(Conversation.user_id)
+            .subquery()
+        )
+        conv_cnt_sq = (
+            select(
+                Conversation.user_id.label('uid'),
+                func.count().label('conversation_count'),
+            )
+            .group_by(Conversation.user_id)
+            .subquery()
+        )
+
+        base = (
+            select(
+                User,
+                msg_agg.c.last_message_at,
+                msg_agg.c.message_count,
+                conv_cnt_sq.c.conversation_count,
+            )
+            .outerjoin(msg_agg, msg_agg.c.uid == User.id)
+            .outerjoin(conv_cnt_sq, conv_cnt_sq.c.uid == User.id)
+        )
+        if where is not None:
+            base = base.where(where)
+
+        sort_key = (sort or 'recent_activity').strip()
+        if sort_key == 'message_volume':
+            stmt = base.order_by(
+                desc(msg_agg.c.message_count).nulls_last(),
+                desc(User.created_at),
+            )
+        elif sort_key == 'conversation_count':
+            stmt = base.order_by(
+                desc(conv_cnt_sq.c.conversation_count).nulls_last(),
+                desc(User.created_at),
+            )
+        elif sort_key == 'signup':
+            stmt = base.order_by(desc(User.created_at))
+        elif sort_key == 'email':
+            stmt = base.order_by(
+                case((User.email.is_(None), 1), else_=0).asc(),
+                func.lower(User.email).asc(),
+                User.id.asc(),
+            )
+        else:
+            # recent_activity（默认）：全站最近一次消息时间
+            stmt = base.order_by(
+                desc(msg_agg.c.last_message_at).nulls_last(),
+                desc(User.created_at),
+            )
+
+        cnt_stmt = select(func.count()).select_from(User)
+        if where is not None:
+            cnt_stmt = cnt_stmt.where(where)
+        total = int(db.session.scalar(cnt_stmt) or 0)
+
+        rows = db.session.execute(stmt.offset(offset).limit(limit)).all()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            u = row[0]
+            lma = row[1]
+            mc = row[2]
+            cc = row[3]
+            out.append(
+                {
+                    'id': u.id,
+                    'email': u.email or '',
+                    'display_name': u.display_name or '',
+                    'created_at': _isoformat_utc(u.created_at),
+                    'last_message_at': _isoformat_utc(lma) if lma else None,
+                    'message_count': int(mc or 0),
+                    'conversation_count': int(cc or 0),
+                }
+            )
+        return out, total
 
     def upsert_user_from_provider(
         self,

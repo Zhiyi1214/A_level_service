@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>管理台</title>
+    <style>
+        :root {
+            --bg: #0f1419;
+            --panel: #1a222d;
+            --text: #e7ecf3;
+            --muted: #8b98a8;
+            --accent: #5b8def;
+            --danger: #f87171;
+            --ok: #4ade80;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 24px 18px 48px;
+        }
+        h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 8px; }
+        .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 24px; }
+        .panel {
+            background: var(--panel);
+            border-radius: 12px;
+            padding: 20px;
+            max-width: 720px;
+            margin-bottom: 16px;
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+        label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 6px; }
+        input[type="password"] {
+            width: 100%;
+            max-width: 360px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.12);
+            background: var(--bg);
+            color: var(--text);
+            font-size: 1rem;
+        }
+        button {
+            margin-top: 12px;
+            padding: 10px 18px;
+            border-radius: 8px;
+            border: none;
+            background: var(--accent);
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        button.secondary {
+            background: transparent;
+            border: 1px solid rgba(255,255,255,0.2);
+            color: var(--muted);
+        }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .err { color: var(--danger); font-size: 0.85rem; margin-top: 10px; }
+        .hint { color: var(--muted); font-size: 0.8rem; margin-top: 14px; line-height: 1.5; }
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 12px;
+        }
+        .metric {
+            background: rgba(0,0,0,0.25);
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .metric .k { font-size: 0.75rem; color: var(--muted); }
+        .metric .v { font-size: 1.35rem; font-weight: 700; margin-top: 4px; }
+        pre {
+            margin: 12px 0 0;
+            padding: 12px;
+            background: rgba(0,0,0,0.35);
+            border-radius: 8px;
+            font-size: 0.75rem;
+            overflow-x: auto;
+            color: var(--muted);
+        }
+        a.back { color: var(--accent); text-decoration: none; font-size: 0.85rem; }
+        a.back:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <p><a class="back" href="/">← 返回应用</a></p>
+    <h1>管理台</h1>
+    <p class="sub">只读指标与配置摘要（不含密钥）</p>
+
+    <div id="loginPanel" class="panel" hidden>
+        <h2 style="font-size:1rem;margin:0 0 12px;">登录</h2>
+        <div id="loginForm" hidden>
+            <label for="secretInput">管理口令</label>
+            <input type="password" id="secretInput" autocomplete="current-password" />
+            <div>
+                <button type="button" id="loginBtn">登录</button>
+            </div>
+            <p id="loginErr" class="err" hidden></p>
+        </div>
+        <p id="whitelistHint" class="hint" hidden>
+            当前未配置口令登录。请先在主应用使用<strong>管理员邮箱（ADMIN_EMAILS）</strong>对应的账号完成 Google / 邮箱登录，然后刷新本页。
+        </p>
+    </div>
+
+    <div id="dashPanel" class="panel" hidden>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:16px;">
+            <button type="button" class="secondary" id="logoutBtn">退出管理会话</button>
+            <button type="button" id="refreshBtn">刷新数据</button>
+        </div>
+        <h2 style="font-size:1rem;margin:0 0 12px;">数据概览</h2>
+        <div id="metricsGrid" class="metrics-grid"></div>
+        <h2 style="font-size:1rem;margin:16px 0 8px;">应用与配置</h2>
+        <pre id="appBlock"></pre>
+        <h2 style="font-size:1rem;margin:16px 0 8px;">身份提供方（用户数）</h2>
+        <pre id="idBlock"></pre>
+    </div>
+
+    <p id="loadErr" class="err" hidden></p>
+
+    <script>
+        const CSRF_HEADER = { 'X-Requested-With': 'XMLHttpRequest' };
+        const SECRET_LOGIN = {{ 'true' if admin_secret_configured else 'false' }};
+        const AUTH_ON = {{ 'true' if auth_configured else 'false' }};
+        const ADMIN_EMAILS = {{ 'true' if admin_emails_configured else 'false' }};
+
+        async function api(method, path, body) {
+            const opt = {
+                method,
+                credentials: 'same-origin',
+                headers: { ...CSRF_HEADER },
+            };
+            if (body !== undefined) {
+                opt.headers['Content-Type'] = 'application/json';
+                opt.body = JSON.stringify(body);
+            }
+            const r = await fetch(path, opt);
+            const data = await r.json().catch(() => ({}));
+            return { ok: r.ok, status: r.status, data };
+        }
+
+        function show(el, on) {
+            if (el) el.hidden = !on;
+        }
+
+        function renderMetrics(payload) {
+            const db = payload.database || {};
+            const items = [
+                ['用户数', db.total_users],
+                ['会话总数', db.total_conversations],
+                ['消息总数', db.total_messages],
+                ['会话涉及用户数', db.distinct_conversation_user_ids],
+                ['未过期邮箱验证码', db.pending_email_login_challenges],
+            ];
+            const grid = document.getElementById('metricsGrid');
+            grid.innerHTML = items.map(([k, v]) =>
+                `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`
+            ).join('');
+            document.getElementById('appBlock').textContent = JSON.stringify(payload.app || {}, null, 2);
+            document.getElementById('idBlock').textContent = JSON.stringify(
+                db.user_identities_by_provider || {},
+                null,
+                2
+            );
+        }
+
+        async function refreshStatus() {
+            const le = document.getElementById('loadErr');
+            show(le, false);
+            const { ok, data } = await api('GET', '/api/admin/status');
+            if (!ok) {
+                le.textContent = '无法读取状态';
+                show(le, true);
+                return;
+            }
+            const authed = data.authenticated;
+            show(document.getElementById('loginPanel'), !authed);
+            show(document.getElementById('dashPanel'), authed);
+            if (!authed) {
+                const form = document.getElementById('loginForm');
+                const hint = document.getElementById('whitelistHint');
+                if (SECRET_LOGIN === true) {
+                    show(form, true);
+                    show(hint, false);
+                } else if (AUTH_ON === true && ADMIN_EMAILS === true) {
+                    show(form, false);
+                    show(hint, true);
+                } else {
+                    show(form, false);
+                    show(hint, true);
+                    hint.textContent = '未配置可用的登录方式，请在服务器设置 ADMIN_SECRET 或（启用主站登录后）配置 ADMIN_EMAILS。';
+                }
+                return;
+            }
+            const m = await api('GET', '/api/admin/metrics');
+            if (!m.ok) {
+                le.textContent = (m.data && m.data.detail) || '加载指标失败';
+                show(le, true);
+                return;
+            }
+            renderMetrics(m.data);
+        }
+
+        document.getElementById('loginBtn').addEventListener('click', async () => {
+            const err = document.getElementById('loginErr');
+            show(err, false);
+            const secret = (document.getElementById('secretInput').value || '').trim();
+            const { ok, data } = await api('POST', '/api/admin/login', { secret });
+            if (!ok) {
+                err.textContent = (data && data.detail) || '登录失败';
+                show(err, true);
+                return;
+            }
+            await refreshStatus();
+        });
+
+        document.getElementById('logoutBtn').addEventListener('click', async () => {
+            await api('POST', '/api/admin/logout');
+            await refreshStatus();
+        });
+
+        document.getElementById('refreshBtn').addEventListener('click', refreshStatus);
+
+        refreshStatus();
+    </script>
+</body>
+</html>
