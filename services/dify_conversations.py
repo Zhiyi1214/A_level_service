@@ -49,7 +49,7 @@ def fetch_conversation_names_map(
     last_id: str | None = None
 
     try:
-        with httpx.Client(timeout=BLOCK_TIMEOUT) as client:
+        with httpx.Client(timeout=BLOCK_TIMEOUT, follow_redirects=True) as client:
             while wanted - found.keys():
                 params: dict[str, str | int] = {
                     'user': user_id,

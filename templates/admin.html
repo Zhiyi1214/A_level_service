@@ -151,10 +151,11 @@
         function renderMetrics(payload) {
             const db = payload.database || {};
             const items = [
-                ['用户数', db.total_users],
+                ['用户数（含临时）', db.total_users],
+                ['已注册用户', db.registered_users ?? 0],
                 ['会话总数', db.total_conversations],
                 ['消息总数', db.total_messages],
-                ['会话涉及用户数', db.distinct_conversation_user_ids],
+                ['会话中不同 user_id', db.distinct_conversation_user_ids],
                 ['未过期邮箱验证码', db.pending_email_login_challenges],
             ];
             const grid = document.getElementById('metricsGrid');

@@ -59,6 +59,8 @@ services:
       dockerfile: Dockerfile
     image: a-level-assistant:${APP_IMAGE_TAG:-47}
     container_name: ai-assistant
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - .env
     environment:
@@ -87,6 +89,7 @@ services:
         condition: service_started
     networks:
       - ai-network
+      - dify-compose-net
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
@@ -121,4 +124,8 @@ volumes:
 
 networks:
   ai-network:
+    name: ai-level-assistant-net
     driver: bridge
+  dify-compose-net:
+    external: true
+    name: ${DIFY_DOCKER_NETWORK:-docker_default}
