@@ -140,7 +140,7 @@ docker compose up -d --build
 
 | 入口 | 地址 |
 |------|------|
-| Nginx 代理 | http://localhost:8080 |
+| HTTP（经 edge-gateway） | 见 `edge-gateway/nginx.conf` 中 `server_name`，默认 `alevel.local` |
 | 直连后端 | http://localhost:8000 |
 | 健康检查 | http://localhost:8000/api/health |
 
