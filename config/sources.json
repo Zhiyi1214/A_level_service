@@ -2,9 +2,9 @@
   "sources": [
     {
       "id": "AQA",
-      "name": "AQA Chemistry",
+      "name": "AQA A2 Chemistry",
       "type": "dify_chat",
-      "api_url": "http://host.docker.internal/v1",
+      "api_url": "http://docker-api-1:5001/v1",
       "auth_ref": "DIFY_API_KEY_AQA",
       "description": "AQA A2 Chemistry",
       "enabled": true,
@@ -12,9 +12,9 @@
     },
     {
       "id": "CIE",
-      "name": "CIE Chemistry",
+      "name": "CIE A2 Chemistry",
       "type": "dify_chat",
-      "api_url": "http://host.docker.internal/v1",
+      "api_url": "http://docker-api-1:5001/v1",
       "auth_ref": "DIFY_API_KEY_CIE",
       "description": "CIE A2 Chemistry",
       "enabled": true,
@@ -22,9 +22,9 @@
     },
     {
       "id": "EDX",
-      "name": "EDX Chemistry",
+      "name": "EDX A2 Chemistry",
       "type": "dify_chat",
-      "api_url": "http://host.docker.internal/v1",
+      "api_url": "http://docker-api-1:5001/v1",
       "auth_ref": "DIFY_API_KEY_EDX",
       "description": "EDX A2 Chemistry",
       "enabled": true,

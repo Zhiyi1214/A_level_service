@@ -3,6 +3,7 @@ import logging
 from botocore.exceptions import ClientError
 from flask import Blueprint, Response, jsonify, stream_with_context
 
+from auth.admin_auth import is_admin
 from auth.context import effective_user_id, oauth_login_required_response
 from config import settings
 from extensions import limiter
@@ -36,7 +37,10 @@ def get_object(object_key: str):
             return oauth_login_required_response()
 
     owner = _owner_from_chat_object_key(key)
-    if not owner or owner != viewer:
+    if not owner:
+        return jsonify({'error': 'Forbidden'}), 403
+    # 附件路径含上传者 user_id；管理员只读查看他人会话时需能拉取同源 /api/media
+    if owner != viewer and not is_admin():
         return jsonify({'error': 'Forbidden'}), 403
 
     try:

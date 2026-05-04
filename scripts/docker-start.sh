@@ -94,7 +94,7 @@ start_services() {
     print_success "服务启动完成！"
     echo ""
     echo "📍 访问地址："
-    echo "   经 Nginx: http://localhost:8080"
+    echo "   经 edge-gateway / 域名（见 ../edge-gateway/nginx.conf 中 server_name）"
     echo "   后端 API: http://localhost:8000"
     echo "   健康检查: http://localhost:8000/api/health"
     echo ""
@@ -121,7 +121,7 @@ view_logs() {
     if [ "$1" == "backend" ]; then
         docker-compose logs -f ai-assistant
     elif [ "$1" == "nginx" ]; then
-        docker-compose logs -f nginx
+        docker-compose logs -f alevel-nginx
     else
         docker-compose logs -f
     fi
@@ -141,7 +141,7 @@ enter_shell() {
     if [ "$1" == "backend" ]; then
         docker-compose exec ai-assistant bash
     elif [ "$1" == "nginx" ]; then
-        docker-compose exec nginx sh
+        docker-compose exec alevel-nginx sh
     else
         print_error "请指定容器: backend 或 nginx"
         exit 1
@@ -168,12 +168,7 @@ health_check() {
         print_error "后端服务异常"
     fi
 
-    # 检查 Nginx 代理
-    if curl -sf http://localhost:8080/api/health > /dev/null 2>&1; then
-        print_success "Nginx 代理健康 ✓"
-    else
-        print_warning "Nginx 代理异常（可检查 8080 是否映射）"
-    fi
+    # alevel-nginx 不映射宿主机端口，HTTP 由 edge-gateway 转发；可手动 curl 容器内或 edge 域名自测
 }
 
 # 显示帮助信息

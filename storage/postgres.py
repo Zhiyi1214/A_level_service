@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import case, delete, desc, func, or_, select
+from sqlalchemy import case, delete, desc, func, or_, select, union
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import selectinload
 
@@ -353,7 +353,17 @@ class PostgresStore:
     def admin_metrics_snapshot(self) -> dict[str, Any]:
         """只读聚合指标，供管理台使用（须在应用上下文中调用）。"""
         now = datetime.now(timezone.utc)
-        total_users = int(db.session.scalar(select(func.count()).select_from(User)) or 0)
+        registered_users = int(
+            db.session.scalar(select(func.count()).select_from(User)) or 0
+        )
+        # users 表 + 会话里出现过的 user_id（含未登录时的临时 id）并集去重
+        _all_user_ids = union(
+            select(User.id),
+            select(Conversation.user_id),
+        ).subquery()
+        total_users = int(
+            db.session.scalar(select(func.count()).select_from(_all_user_ids)) or 0
+        )
         total_conversations = int(
             db.session.scalar(select(func.count()).select_from(Conversation)) or 0
         )
@@ -380,6 +390,7 @@ class PostgresStore:
         identities_by_provider = {str(r[0]): int(r[1]) for r in rows}
         return {
             'total_users': total_users,
+            'registered_users': registered_users,
             'total_conversations': total_conversations,
             'total_messages': total_messages,
             'distinct_conversation_user_ids': distinct_conv_users,
@@ -418,17 +429,16 @@ class PostgresStore:
         limit: int,
         offset: int,
     ) -> tuple[list[dict[str, Any]], int]:
-        """管理台：可选筛选 + 多种排序（最近发消息、消息量、会话数、注册时间、邮箱）。"""
+        """管理台：可选筛选 + 多种排序（最近发消息、消息量、会话数、注册时间、邮箱）。
+
+        用户集合为 users.id 与 conversations.user_id 的并集，未登录时的临时 user_id 也会列出。
+        """
         qstrip = (q or '').strip()
-        where = None
-        if qstrip:
-            ql = qstrip.lower()
-            where = or_(
-                func.lower(User.email).like(
-                    _like_literal_contains(ql), escape=_LIKE_ESC
-                ),
-                User.id.like(_like_literal_contains(qstrip), escape=_LIKE_ESC),
-            )
+
+        uids = union(
+            select(User.id.label('uid')),
+            select(Conversation.user_id.label('uid')),
+        ).subquery('uids')
 
         msg_agg = (
             select(
@@ -446,70 +456,110 @@ class PostgresStore:
                 Conversation.user_id.label('uid'),
                 func.count().label('conversation_count'),
             )
+            .select_from(Conversation)
+            .group_by(Conversation.user_id)
+            .subquery()
+        )
+        first_conv_sq = (
+            select(
+                Conversation.user_id.label('uid'),
+                func.min(Conversation.created_at).label('first_at'),
+            )
+            .select_from(Conversation)
             .group_by(Conversation.user_id)
             .subquery()
         )
 
+        created_effective = func.coalesce(
+            User.created_at, first_conv_sq.c.first_at
+        ).label('created_effective')
+
         base = (
             select(
-                User,
+                uids.c.uid.label('user_id'),
+                User.email,
+                User.display_name,
+                User.created_at.label('user_created_at'),
+                created_effective,
                 msg_agg.c.last_message_at,
                 msg_agg.c.message_count,
                 conv_cnt_sq.c.conversation_count,
+                first_conv_sq.c.first_at,
             )
-            .outerjoin(msg_agg, msg_agg.c.uid == User.id)
-            .outerjoin(conv_cnt_sq, conv_cnt_sq.c.uid == User.id)
+            .select_from(uids)
+            .outerjoin(User, User.id == uids.c.uid)
+            .outerjoin(msg_agg, msg_agg.c.uid == uids.c.uid)
+            .outerjoin(conv_cnt_sq, conv_cnt_sq.c.uid == uids.c.uid)
+            .outerjoin(first_conv_sq, first_conv_sq.c.uid == uids.c.uid)
         )
-        if where is not None:
-            base = base.where(where)
+
+        filtered = base
+        if qstrip:
+            ql = qstrip.lower()
+            filtered = base.where(
+                or_(
+                    uids.c.uid.like(
+                        _like_literal_contains(qstrip), escape=_LIKE_ESC
+                    ),
+                    func.lower(func.coalesce(User.email, '')).like(
+                        _like_literal_contains(ql), escape=_LIKE_ESC
+                    ),
+                )
+            )
 
         sort_key = (sort or 'recent_activity').strip()
         if sort_key == 'message_volume':
-            stmt = base.order_by(
+            stmt = filtered.order_by(
                 desc(msg_agg.c.message_count).nulls_last(),
-                desc(User.created_at),
+                desc(created_effective).nulls_last(),
             )
         elif sort_key == 'conversation_count':
-            stmt = base.order_by(
+            stmt = filtered.order_by(
                 desc(conv_cnt_sq.c.conversation_count).nulls_last(),
-                desc(User.created_at),
+                desc(created_effective).nulls_last(),
             )
         elif sort_key == 'signup':
-            stmt = base.order_by(desc(User.created_at))
+            stmt = filtered.order_by(desc(created_effective).nulls_last())
         elif sort_key == 'email':
-            stmt = base.order_by(
-                case((User.email.is_(None), 1), else_=0).asc(),
-                func.lower(User.email).asc(),
-                User.id.asc(),
+            stmt = filtered.order_by(
+                case((func.coalesce(User.email, '') == '', 1), else_=0).asc(),
+                func.lower(func.coalesce(User.email, '')).asc(),
+                uids.c.uid.asc(),
             )
         else:
-            # recent_activity（默认）：全站最近一次消息时间
-            stmt = base.order_by(
+            stmt = filtered.order_by(
                 desc(msg_agg.c.last_message_at).nulls_last(),
-                desc(User.created_at),
+                desc(created_effective).nulls_last(),
             )
 
-        cnt_stmt = select(func.count()).select_from(User)
-        if where is not None:
-            cnt_stmt = cnt_stmt.where(where)
-        total = int(db.session.scalar(cnt_stmt) or 0)
+        total = int(
+            db.session.scalar(select(func.count()).select_from(filtered.subquery()))
+            or 0
+        )
 
         rows = db.session.execute(stmt.offset(offset).limit(limit)).all()
         out: list[dict[str, Any]] = []
         for row in rows:
-            u = row[0]
-            lma = row[1]
-            mc = row[2]
-            cc = row[3]
+            lma = row.last_message_at
+            mc = row.message_count
+            cc = row.conversation_count
+            uc = row.user_created_at
+            fa = row.first_at
+            created_src = uc or fa
             out.append(
                 {
-                    'id': u.id,
-                    'email': u.email or '',
-                    'display_name': u.display_name or '',
-                    'created_at': _isoformat_utc(u.created_at),
+                    'id': row.user_id,
+                    'email': (row.email or '') if row.email is not None else '',
+                    'display_name': (row.display_name or '')
+                    if row.display_name is not None
+                    else '',
+                    'created_at': _isoformat_utc(created_src)
+                    if created_src
+                    else None,
                     'last_message_at': _isoformat_utc(lma) if lma else None,
                     'message_count': int(mc or 0),
                     'conversation_count': int(cc or 0),
+                    'is_registered': bool(uc is not None),
                 }
             )
         return out, total

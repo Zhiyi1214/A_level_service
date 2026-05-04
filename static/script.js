@@ -272,6 +272,7 @@ function enforceNonAdminAdminUiClosed(me) {
     }
 }
 
+/** @returns {Promise<{ ok: boolean, data: Record<string, unknown> }>} */
 async function refreshAuthState() {
     const response = await apiFetch('/api/me', {
         cache: 'no-store',
@@ -294,6 +295,7 @@ async function refreshAuthState() {
     authUser = data.authenticated && data.user ? data.user : null;
     updateFooterAdminLink(data);
     enforceNonAdminAdminUiClosed(data);
+    return { ok: response.ok, data };
 }
 
 function updateFooterAdminLink(data) {
@@ -335,6 +337,25 @@ function bindFooterAdminLink() {
     });
 }
 
+function openAdminSidebarDock() {
+    renderSidebarStatus('');
+    const dock = document.getElementById('adminSidebarDock');
+    if (!dock) {
+        return;
+    }
+    dock.hidden = false;
+    const app = document.querySelector('.app-container');
+    if (app) {
+        if (isMobileViewport()) {
+            app.classList.add('mobile-admin-open');
+        } else {
+            app.classList.remove('mobile-admin-open');
+        }
+    }
+    switchAdminTab('overview');
+    loadAdminOverviewMetrics();
+}
+
 function toggleAdminWorkspace() {
     const dock = document.getElementById('adminSidebarDock');
     if (!dock) {
@@ -346,69 +367,71 @@ function toggleAdminWorkspace() {
     }
     void (async () => {
         try {
-            if (!authConfigured) {
-                await refreshAuthState();
-                let meR = await apiFetch('/api/me', { cache: 'no-store' });
-                let me = await meR.json();
+            const { ok, data: me } = await refreshAuthState();
+            if (!ok) {
+                renderSidebarStatus('无法校验登录状态（/api/me 失败），请检查网络或刷新页面');
+                return;
+            }
+
+            if (authConfigured) {
                 if (!me.is_admin) {
-                    const input = document.getElementById('messageInput');
-                    const secret = input ? (input.value || '').trim() : '';
-                    if (!secret) {
-                        return;
-                    }
-                    const lr = await apiFetch('/api/admin/login', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ secret })
-                    });
-                    if (!lr.ok) {
-                        return;
-                    }
-                    if (input) {
-                        input.value = '';
-                        input.style.height = '44px';
-                    }
-                    syncSendBtn();
-                    await refreshAuthState();
-                    meR = await apiFetch('/api/me', { cache: 'no-store' });
-                    me = await meR.json();
-                    if (!me.is_admin) {
-                        return;
-                    }
+                    window.location.href = '/admin';
+                    return;
                 }
-                dock.hidden = false;
-                const app = document.querySelector('.app-container');
-                if (app) {
-                    if (isMobileViewport()) {
-                        app.classList.add('mobile-admin-open');
-                    } else {
-                        app.classList.remove('mobile-admin-open');
-                    }
-                }
-                switchAdminTab('overview');
-                loadAdminOverviewMetrics();
+                openAdminSidebarDock();
                 return;
             }
-            const r = await apiFetch('/api/me', { cache: 'no-store' });
-            const me = await r.json();
-            if (!me.is_admin) {
-                window.location.href = '/admin';
+
+            if (me.is_admin) {
+                openAdminSidebarDock();
                 return;
             }
-            dock.hidden = false;
-            const app = document.querySelector('.app-container');
-            if (app) {
-                if (isMobileViewport()) {
-                    app.classList.add('mobile-admin-open');
-                } else {
-                    app.classList.remove('mobile-admin-open');
-                }
+
+            const input = document.getElementById('messageInput');
+            const secret = input ? (input.value || '').trim() : '';
+            if (!secret) {
+                renderSidebarStatus('请先在底部输入框粘贴管理口令，再点 Admin');
+                return;
             }
-            switchAdminTab('overview');
-            loadAdminOverviewMetrics();
+            const lr = await apiFetch('/api/admin/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ secret })
+            });
+            const loginBody = await lr.json().catch(() => ({}));
+            if (!lr.ok) {
+                let hint = `管理登录失败（HTTP ${lr.status}）`;
+                if (lr.status === 401) {
+                    hint = '管理口令不正确';
+                } else if (lr.status === 403) {
+                    hint =
+                        loginBody && loginBody.detail === '未启用口令登录'
+                            ? '服务端未启用口令登录（未配置 ADMIN_SECRET）'
+                            : '无权限登录管理台';
+                } else if (lr.status === 429) {
+                    hint = '登录尝试过于频繁，请稍后再试';
+                }
+                renderSidebarStatus(hint);
+                return;
+            }
+            if (input) {
+                input.value = '';
+                input.style.height = '44px';
+            }
+            syncSendBtn();
+            const after = await refreshAuthState();
+            if (!after.ok || !after.data.is_admin) {
+                renderSidebarStatus(
+                    '口令已接受但会话未生效：请确认站点为 HTTPS、浏览器允许 Cookie，或刷新后重试'
+                );
+                return;
+            }
+            openAdminSidebarDock();
         } catch (e) {
             if (authConfigured) {
                 window.location.href = '/admin';
+            } else {
+                renderSidebarStatus('打开管理台失败，请刷新页面或查看控制台');
             }
         }
     })();
@@ -480,10 +503,11 @@ async function loadAdminOverviewMetrics() {
         const payload = await r.json();
         const db = payload.database || {};
         const items = [
-            ['用户数', db.total_users],
+            ['用户数（含临时）', db.total_users],
+            ['已注册用户', db.registered_users ?? 0],
             ['会话总数', db.total_conversations],
             ['消息总数', db.total_messages],
-            ['会话涉及用户数', db.distinct_conversation_user_ids],
+            ['会话中不同 user_id', db.distinct_conversation_user_ids],
             ['未过期邮箱验证码', db.pending_email_login_challenges]
         ];
         if (grid) {
@@ -544,7 +568,12 @@ async function loadAdminUsersList() {
             const row = document.createElement('button');
             row.type = 'button';
             row.className = 'admin-user-pick-row';
-            const em = (u.email || '').trim() || '(无邮箱)';
+            const isTemp = u.is_registered === false;
+            const idShort =
+                !u.id ? '' : u.id.length > 28 ? `${u.id.slice(0, 24)}…` : u.id;
+            const em =
+                (u.email || '').trim() ||
+                (isTemp ? `临时 · ${idShort}` : '(无邮箱)');
             const nm = (u.display_name || '').trim();
             const title = nm ? `${em} — ${nm}` : em;
             const sub = [];
@@ -2655,24 +2684,50 @@ async function adminLoadReadonlyConversation(conversationId) {
         chat.classList.add('admin-inspect-mode');
     }
     setCurrentConversation(conversationId);
-    const messagesArea = document.getElementById('messagesArea');
-    if (messagesArea) {
-        messagesArea.innerHTML = renderMessagesLoadingPlaceholder();
+
+    const cached = getConversationDetailCache(conversationId);
+    const now = Date.now();
+    const cacheFresh = !!(cached && now - cached.savedAt < CONVERSATION_DETAIL_CACHE_TTL_MS);
+    if (cacheFresh && cached) {
+        const st = getConversationState(conversationId);
+        if (st) {
+            st.loadingOlderMessages = false;
+        }
+        setConversationServerData(conversationId, cached.data);
+        if (cached.data.source_id) {
+            selectedSourceId = cached.data.source_id;
+            renderSourceOptions();
+        }
+        setSourceLocked(true);
+        renderConversationView(conversationId);
+        updateCurrentSourceTitle();
+        updateActiveConversation();
+        return;
     }
+
     const state = getConversationState(conversationId);
     if (state) {
         state.loadingOlderMessages = false;
-        state.serverConversation = {
-            id: conversationId,
-            created_at: '',
-            messages: [],
-            source_id: '',
-            source_name: '',
-            dify_title: '',
-            has_more_older: false,
-            message_count_total: null
-        };
+        if (cached) {
+            setConversationServerData(conversationId, cached.data);
+        } else if (state.serverConversation) {
+            state.serverConversation = {
+                ...state.serverConversation,
+                messages: [],
+                has_more_older: false,
+                message_count_total: null
+            };
+        }
     }
+
+    const hadRenderableMessages = getConversationMessagesForView(conversationId).length > 0;
+    const messagesArea = document.getElementById('messagesArea');
+    if (hadRenderableMessages) {
+        renderConversationView(conversationId);
+    } else if (messagesArea) {
+        messagesArea.innerHTML = renderMessagesLoadingPlaceholder();
+    }
+
     try {
         const response = await apiFetch(
             conversationDetailUrl(conversationId, { messageLimit: CONVERSATION_MESSAGE_PAGE_SIZE })
@@ -2690,13 +2745,25 @@ async function adminLoadReadonlyConversation(conversationId) {
             }
             return;
         }
+        const prevServerMessages = state && state.serverConversation
+            && Array.isArray(state.serverConversation.messages)
+            ? state.serverConversation.messages
+            : null;
+
         setConversationServerData(conversationId, data);
+        setConversationDetailCache(conversationId, data);
         if (data.source_id) {
             selectedSourceId = data.source_id;
             renderSourceOptions();
         }
         setSourceLocked(true);
-        renderConversationView(conversationId);
+
+        const nextMessages = Array.isArray(data.messages) ? data.messages : [];
+        const serverChanged = !conversationServerMessagesEqual(prevServerMessages, nextMessages);
+        const hasLocalTail = state && Array.isArray(state.localMessages) && state.localMessages.length > 0;
+        if (!hadRenderableMessages || serverChanged || hasLocalTail) {
+            renderConversationView(conversationId);
+        }
         updateCurrentSourceTitle();
         updateActiveConversation();
     } catch (e) {

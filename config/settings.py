@@ -52,6 +52,12 @@ if APP_ENV == 'production' and not _secret_key_env:
 SECRET_KEY = _secret_key_env or secrets.token_hex(32)
 HOST = os.getenv('HOST', '0.0.0.0')
 PORT = int(os.getenv('PORT', 5000))
+# 位于几层「会改写 X-Forwarded-For」的可信反向代理之后（仅本机 Nginx→Gunicorn 为 1；
+# 若前面还有一层公网 Nginx/SLB，且内层使用 proxy_add_x_forwarded_for，一般为 2）。
+try:
+    PROXY_FIX_X_FOR = max(1, min(5, int(os.getenv('PROXY_FIX_X_FOR', '1'))))
+except ValueError:
+    PROXY_FIX_X_FOR = 1
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 # 页脚展示用；可被 .env 覆盖。静态资源 ?v= 在进程启动时算一次（见 STATIC_ASSET_TAG），避免每个请求 stat 磁盘。
 FRONTEND_VERSION = os.getenv('FRONTEND_VERSION', '47')

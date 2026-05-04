@@ -59,6 +59,8 @@ services:
       dockerfile: Dockerfile
     image: a-level-assistant:${APP_IMAGE_TAG:-47}
     container_name: ai-assistant
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - .env
     environment:
@@ -87,6 +89,7 @@ services:
         condition: service_started
     networks:
       - ai-network
+      - dify-compose-net
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
@@ -97,11 +100,10 @@ services:
     labels:
       - "com.example.description=AI Assistant Backend"
 
-  nginx:
+  # 不映射宿主机端口；对外 HTTP 由 ../edge-gateway 在 proxy-net（或 PROXY_TIER_NETWORK）上访问 alevel-gateway
+  alevel-nginx:
     image: nginx:alpine
     container_name: ai-assistant-nginx
-    ports:
-      - "8080:80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx.cloudflare-realip.conf:/etc/nginx/nginx.cloudflare-realip.conf:ro
@@ -111,8 +113,13 @@ services:
       minio:
         condition: service_started
     networks:
-      - ai-network
+      ai-network:
+      proxy-net:
+        aliases:
+          - alevel-gateway
     restart: unless-stopped
+
+# 部署前执行：docker network create proxy-net（与 edge-gateway 共用；若用其他名则设 PROXY_TIER_NETWORK）
 
 volumes:
   pgdata:
@@ -121,4 +128,11 @@ volumes:
 
 networks:
   ai-network:
+    name: ai-level-assistant-net
     driver: bridge
+  proxy-net:
+    external: true
+    name: ${PROXY_TIER_NETWORK:-proxy-net}
+  dify-compose-net:
+    external: true
+    name: ${DIFY_DOCKER_NETWORK:-docker_default}
